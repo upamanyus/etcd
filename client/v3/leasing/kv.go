@@ -219,7 +219,11 @@ func (lkv *leasingKV) tryModifyOp(ctx context.Context, op v3.Op) (*v3.TxnRespons
 	switch {
 	case err != nil:
 		lkv.leases.Evict(key)
-		fallthrough
+		// FIXME(goose): fallthrough unsupported, so copy/pasted the next case
+		if wc != nil {
+			close(wc)
+		}
+		return nil, nil, err
 	case !resp.Succeeded:
 		if wc != nil {
 			close(wc)
