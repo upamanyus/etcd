@@ -53,29 +53,21 @@ func TestLeasingConcurrentPutDelete(t *testing.T) {
 	// Thread to try Put()
 	go func () {
 		<- start
-		for range 1 {
-			_, err := lkv.Put(context.TODO(), "abc", "def")
-			if err != nil {
-				errs <- err
-			}
-		}
-		errs <- nil
+		_, err := lkv.Put(context.TODO(), "abc", "def")
+		errs <- err
 	}()
 
 	// Thread to try Delete()
 	go func () {
 		<- start
-		// time.Sleep(100 * time.Millisecond)
-		for range 1 {
-			_, err := lkv.Delete(context.TODO(), "abc")
-			if err != nil {
-				errs <- err
-			}
-		}
-		errs <- nil
+		_, err := lkv.Delete(context.TODO(), "abc")
+		errs <- err
 	}()
 
+	// Try to make sure both goroutines are waiting on start; this seems to make
+	// the test fail more reliably.
 	time.Sleep(100 * time.Millisecond)
+
 	close(start)
 	for range 2 {
 		if err := <-errs; err != nil {
