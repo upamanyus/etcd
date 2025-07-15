@@ -33,6 +33,76 @@ import (
 	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
+func TestLeasingConcurrentPutDelete(t *testing.T) {
+	integration2.BeforeTest(t)
+	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	lkv, closeLkv, err := leasing.NewKV(clus.Client(0), "foo/")
+	require.NoError(t, err)
+	defer closeLkv()
+
+	// Enter into cache.
+	if resp, err := lkv.Get(context.TODO(), "abc"); err != nil || (len(resp.Kvs)) != 0 {
+		t.Errorf("expected nil, got %q", resp.Kvs[0].Key)
+	}
+
+	errs := make(chan error)
+
+	start := make(chan struct{})
+	// Thread to try Put()
+	go func () {
+		<- start
+		for range 1 {
+			_, err := lkv.Put(context.TODO(), "abc", "def")
+			if err != nil {
+				errs <- err
+			}
+		}
+		errs <- nil
+	}()
+
+	// Thread to try Delete()
+	go func () {
+		<- start
+		// time.Sleep(100 * time.Millisecond)
+		for range 1 {
+			_, err := lkv.Delete(context.TODO(), "abc")
+			if err != nil {
+				errs <- err
+			}
+		}
+		errs <- nil
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// At this point, lkv might incorrectly think that abc -> def, even though
+	// the server executes delete after put.
+	lkv2, closeLkv2, err := leasing.NewKV(clus.Client(0), "foo/")
+	require.NoError(t, err)
+	defer closeLkv2()
+
+	resp, err := lkv.Get(context.TODO(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp2, err := lkv2.Get(context.TODO(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Kvs) != len(resp2.Kvs) {
+		t.Errorf("key %q present in: cached client = %t, new client = %t", "abc", len(resp.Kvs) > 0, len(resp2.Kvs) > 0)
+	}
+}
+
 func TestLeasingPutGet(t *testing.T) {
 	integration2.BeforeTest(t)
 
