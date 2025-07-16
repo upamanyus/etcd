@@ -88,7 +88,7 @@ func (lkv *leasingKV) Get(ctx context.Context, key string, opts ...v3.OpOption) 
 }
 
 func (lkv *leasingKV) Put(ctx context.Context, key, val string, opts ...v3.OpOption) (*v3.PutResponse, error) {
-	return lkv.put(ctx, v3.OpPut(key, val, opts...))
+	return lkv.put(ctx, v3.OpPut(key, val, append([]v3.OpOption{v3.WithPrevKV()}, opts...)...))
 }
 
 func (lkv *leasingKV) Delete(ctx context.Context, key string, opts ...v3.OpOption) (*v3.DeleteResponse, error) {
@@ -242,11 +242,11 @@ func (lkv *leasingKV) put(ctx context.Context, op v3.Op) (pr *v3.PutResponse, er
 			return nil, err
 		}
 		if resp.Succeeded {
-			lkv.leases.mu.Lock()
-			lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), resp.Header)
-			lkv.leases.mu.Unlock()
 			pr = (*v3.PutResponse)(resp.Responses[0].GetResponsePut())
 			pr.Header = resp.Header
+			lkv.leases.mu.Lock()
+			lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), pr)
+			lkv.leases.mu.Unlock()
 		}
 		if wc != nil {
 			close(wc)

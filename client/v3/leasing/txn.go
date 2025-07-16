@@ -159,7 +159,7 @@ func (txn *txnLeasing) guard(ops []v3.Op) ([]v3.Cmp, error) {
 func (txn *txnLeasing) commitToCache(txnResp *v3pb.TxnResponse, userTxn v3.Op) {
 	ops := gatherResponseOps(txnResp.Responses, []v3.Op{userTxn})
 	txn.lkv.leases.mu.Lock()
-	for _, op := range ops {
+	for i, op := range ops {
 		key := string(op.KeyBytes())
 		if op.IsDelete() && len(op.RangeBytes()) > 0 {
 			end := string(op.RangeBytes())
@@ -172,7 +172,7 @@ func (txn *txnLeasing) commitToCache(txnResp *v3pb.TxnResponse, userTxn v3.Op) {
 			txn.lkv.leases.delete(key, txnResp.Header)
 		}
 		if op.IsPut() {
-			txn.lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), txnResp.Header)
+			txn.lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), (*v3.PutResponse)(txnResp.Responses[i].GetResponsePut()))
 		}
 	}
 	txn.lkv.leases.mu.Unlock()

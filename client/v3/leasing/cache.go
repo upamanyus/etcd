@@ -136,25 +136,22 @@ func (lc *leaseCache) Add(key string, resp *v3.GetResponse, op v3.Op) *v3.GetRes
 	return ret
 }
 
-func (lc *leaseCache) Update(key, val []byte, respHeader *v3pb.ResponseHeader) {
-	li := lc.entries[string(key)]
-	if li == nil {
-		return
-	}
-	cacheResp := li.response
-	if len(cacheResp.Kvs) == 0 {
-		kv := &mvccpb.KeyValue{
-			Key:            key,
-			CreateRevision: respHeader.Revision,
+func (lc *leaseCache) Update(key, value []byte, resp *v3.PutResponse) {
+	prevKv := resp.PrevKv
+	if li := lc.entries[string(key)]; li != nil && resp.Header.Revision >= li.response.Header.Revision {
+		li.response.Count = 1
+		li.response.Header = resp.Header
+		var newKv *mvccpb.KeyValue
+		if prevKv == nil {
+			newKv = &mvccpb.KeyValue{
+				Key: key, Value: value, CreateRevision: resp.Header.Revision, ModRevision: resp.Header.Revision, Version: 1,
+			}
+		} else {
+			newKv = &mvccpb.KeyValue{
+				Key: key, Value: value, CreateRevision: prevKv.CreateRevision, ModRevision: resp.Header.Revision, Version: prevKv.Version + 1,
+			}
 		}
-		cacheResp.Kvs = append(cacheResp.Kvs, kv)
-		cacheResp.Count = 1
-	}
-	cacheResp.Kvs[0].Version++
-	if cacheResp.Kvs[0].ModRevision < respHeader.Revision {
-		cacheResp.Header = respHeader
-		cacheResp.Kvs[0].ModRevision = respHeader.Revision
-		cacheResp.Kvs[0].Value = val
+		li.response.Kvs = append(li.response.Kvs[:0], newKv)
 	}
 }
 
