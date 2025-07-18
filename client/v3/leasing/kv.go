@@ -119,7 +119,7 @@ func (lkv *leasingKV) Compact(ctx context.Context, rev int64, opts ...v3.Compact
 }
 
 func (lkv *leasingKV) Txn(ctx context.Context) v3.Txn {
-	return &txnLeasing{Txn: lkv.kv.Txn(ctx), lkv: lkv, ctx: ctx}
+	panic("leasingKV: Txn unimplemented")
 }
 
 func (lkv *leasingKV) monitorSession() {
