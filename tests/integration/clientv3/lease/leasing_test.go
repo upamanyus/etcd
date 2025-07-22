@@ -33,6 +33,93 @@ import (
 	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
+func TestLeasingConcurrentPutGet(t *testing.T) {
+	integration2.BeforeTest(t)
+	clus := integration2.NewCluster(t, &integration2.ClusterConfig{
+		Size:                 3,
+		GRPCKeepAliveMinTime: time.Millisecond, // copied from black hole test
+		UseBridge:            true,
+	})
+	defer clus.Terminate(t)
+
+	// Try to make sure server 0 is not the leader
+	if clus.Members[0].Server.Leader() == clus.Members[0].Server.MemberID() {
+		err := clus.Members[0].Server.MoveLeader(context.TODO(),
+			clus.Members[0].Server.Lead(),
+			uint64(clus.Members[1].Server.MemberID()))
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	lkv, closeLkv, err := leasing.NewKV(clus.Client(0), "foo/")
+	require.NoError(t, err)
+	defer closeLkv()
+
+	// Enter into cache.
+	resp, err := lkv.Get(context.TODO(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	} else if len(resp.Kvs) != 0 {
+		t.Errorf("expected nil, got %q", resp.Kvs[0].Key)
+	}
+
+	startPut := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		<-startPut
+		time.Sleep(time.Microsecond * 1000)
+		// fmt.Println("putting")
+		ctx, cancel := context.WithTimeout(context.TODO(), 1000*time.Millisecond)
+		defer cancel()
+		_, err = lkv.Put(ctx, "abc", "def")
+		// fmt.Println("put got: ", err)
+		wg.Done()
+	}()
+
+	go func() {
+		close(startPut)
+		time.Sleep(time.Microsecond * 2000)
+		// fmt.Println("closing")
+		clus.Members[0].Bridge().Close()
+		// fmt.Println("closed")
+		wg.Done()
+	}()
+
+	<-startPut
+	time.Sleep(1500 * time.Microsecond)
+	resp, err = clus.Client(1).Get(context.TODO(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Kvs) != 0 {
+		if string(resp.Kvs[0].Value) != "def" {
+			t.Errorf("expected either no value or \"def\"; got: %q", resp.Kvs[0])
+		}
+		// fmt.Println("Got \"def\" from direct Get()")
+
+		ctx, cancel := context.WithTimeout(context.TODO(), 1000*time.Millisecond)
+		defer cancel()
+		// fmt.Println("Starting lkv.Get")
+		resp2, err := lkv.Get(ctx, "abc")
+		if err == nil {
+			if len(resp2.Kvs) == 0 {
+				t.Errorf("expected value, got none")
+			} else {
+				// fmt.Printf("Got \"%q\" from lkv.Get()\n", string(resp2.Kvs[0].Value))
+			}
+		} else {
+			// fmt.Println("Got error from lkv.Get attempt:", err)
+		}
+	} else {
+		// fmt.Println("Got none from direct Get()")
+	}
+
+	wg.Wait()
+}
+
 func TestLeasingConcurrentPutDelete(t *testing.T) {
 	integration2.BeforeTest(t)
 	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
@@ -51,15 +138,15 @@ func TestLeasingConcurrentPutDelete(t *testing.T) {
 
 	start := make(chan struct{})
 	// Thread to try Put()
-	go func () {
-		<- start
+	go func() {
+		<-start
 		_, err := lkv.Put(context.TODO(), "abc", "def")
 		errs <- err
 	}()
 
 	// Thread to try Delete()
-	go func () {
-		<- start
+	go func() {
+		<-start
 		_, err := lkv.Delete(context.TODO(), "abc")
 		errs <- err
 	}()
