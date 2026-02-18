@@ -53,9 +53,10 @@ func NewEtcdctl(cfg ClientConfig, endpoints []string, opts ...config.ClientOptio
 		client, err := clientv3.New(clientv3.Config{
 			Endpoints:   ctl.endpoints,
 			DialTimeout: 5 * time.Second,
-			DialOptions: []grpc.DialOption{grpc.WithBlock()},
+			DialOptions: []grpc.DialOption{grpc.WithBlock()}, //nolint:staticcheck // TODO: remove for a supported version
 			Username:    ctl.authConfig.Username,
 			Password:    ctl.authConfig.Password,
+			Token:       ctl.authConfig.Token,
 		})
 		if err != nil {
 			return nil, err
@@ -74,6 +75,13 @@ func WithAuth(userName, password string) config.ClientOption {
 	}
 }
 
+func WithAuthToken(token string) config.ClientOption {
+	return func(c any) {
+		ctl := c.(*EtcdctlV3)
+		ctl.authConfig.Token = token
+	}
+}
+
 func WithEndpoints(endpoints []string) config.ClientOption {
 	return func(c any) {
 		ctl := c.(*EtcdctlV3)
@@ -86,8 +94,12 @@ func (ctl *EtcdctlV3) DowngradeEnable(ctx context.Context, version string) error
 	return err
 }
 
+func (ctl *EtcdctlV3) DowngradeCancel(ctx context.Context) error {
+	_, err := SpawnWithExpectLines(ctx, ctl.cmdArgs("downgrade", "cancel"), nil, expect.ExpectedResponse{Value: "Downgrade cancel success"})
+	return err
+}
+
 func (ctl *EtcdctlV3) Get(ctx context.Context, key string, o config.GetOptions) (*clientv3.GetResponse, error) {
-	resp := clientv3.GetResponse{}
 	var args []string
 	if o.Timeout != 0 {
 		args = append(args, fmt.Sprintf("--command-timeout=%s", o.Timeout))
@@ -111,10 +123,28 @@ func (ctl *EtcdctlV3) Get(ctx context.Context, key string, o config.GetOptions) 
 	if o.FromKey {
 		args = append(args, "--from-key")
 	}
+	writeOut := "json"
+	if o.CountOnly || o.KeysOnly {
+		writeOut = "fields"
+	}
+	args = append(args, "-w", writeOut)
 	if o.CountOnly {
-		args = append(args, "-w", "fields", "--count-only")
-	} else {
-		args = append(args, "-w", "json")
+		args = append(args, "--count-only")
+	}
+	if o.KeysOnly {
+		args = append(args, "--keys-only")
+	}
+	if o.MaxCreateRevision != 0 {
+		args = append(args, fmt.Sprintf("--max-create-rev=%d", o.MaxCreateRevision))
+	}
+	if o.MinCreateRevision != 0 {
+		args = append(args, fmt.Sprintf("--min-create-rev=%d", o.MinCreateRevision))
+	}
+	if o.MaxModRevision != 0 {
+		args = append(args, fmt.Sprintf("--max-mod-rev=%d", o.MaxModRevision))
+	}
+	if o.MinModRevision != 0 {
+		args = append(args, fmt.Sprintf("--min-mod-rev=%d", o.MinModRevision))
 	}
 	switch o.SortBy {
 	case clientv3.SortByCreateRevision:
@@ -146,15 +176,53 @@ func (ctl *EtcdctlV3) Get(ctx context.Context, key string, o config.GetOptions) 
 			return nil, err
 		}
 		defer cmd.Close()
+		// Relying on finding 'Count' as the last line of the output to get all the lines from cmd.Lines()
 		_, err = cmd.ExpectWithContext(ctx, expect.ExpectedResponse{Value: "Count"})
-		return &resp, err
+		if err != nil {
+			return nil, err
+		}
+		return parseFieldsGetResponse(cmd.Lines())
 	}
+	resp := clientv3.GetResponse{}
 	err := ctl.spawnJSONCmd(ctx, &resp, args...)
 	return &resp, err
 }
 
-func (ctl *EtcdctlV3) Put(ctx context.Context, key, value string, opts config.PutOptions) error {
-	args := ctl.cmdArgs()
+func parseFieldsGetResponse(lines []string) (*clientv3.GetResponse, error) {
+	resp := &clientv3.GetResponse{Header: &etcdserverpb.ResponseHeader{}}
+	for _, l := range lines {
+		fields := strings.Split(l, ":")
+		key, value := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+		var err error
+		if key, err = strconv.Unquote(key); err != nil {
+			return resp, err
+		}
+		switch key {
+		case "ClusterID":
+			resp.Header.ClusterId, err = strconv.ParseUint(value, 10, 64)
+		case "MemberID":
+			resp.Header.MemberId, err = strconv.ParseUint(value, 10, 64)
+		case "Revision":
+			resp.Header.Revision, err = strconv.ParseInt(value, 10, 64)
+		case "RaftTerm":
+			resp.Header.RaftTerm, err = strconv.ParseUint(value, 10, 64)
+		case "More":
+			resp.More, err = strconv.ParseBool(value)
+		case "Count":
+			resp.Count, err = strconv.ParseInt(value, 10, 64)
+		default:
+			return resp, fmt.Errorf("unexpected field %q:%s", key, value)
+		}
+		if err != nil {
+			return resp, err
+		}
+	}
+	return resp, nil
+}
+
+func (ctl *EtcdctlV3) Put(ctx context.Context, key, value string, opts config.PutOptions) (*clientv3.PutResponse, error) {
+	resp := clientv3.PutResponse{}
+	args := []string{}
 	args = append(args, "put", key, value)
 	if opts.LeaseID != 0 {
 		args = append(args, "--lease", strconv.FormatInt(int64(opts.LeaseID), 16))
@@ -162,8 +230,8 @@ func (ctl *EtcdctlV3) Put(ctx context.Context, key, value string, opts config.Pu
 	if opts.Timeout != 0 {
 		args = append(args, fmt.Sprintf("--command-timeout=%s", opts.Timeout))
 	}
-	_, err := SpawnWithExpectLines(ctx, args, nil, expect.ExpectedResponse{Value: "OK"})
-	return err
+	err := ctl.spawnJSONCmd(ctx, &resp, args...)
+	return &resp, err
 }
 
 func (ctl *EtcdctlV3) Delete(ctx context.Context, key string, o config.DeleteOptions) (*clientv3.DeleteResponse, error) {
@@ -237,13 +305,13 @@ func (ctl *EtcdctlV3) Txn(ctx context.Context, compares, ifSucess, ifFail []stri
 		return nil, err
 	}
 	var resp clientv3.TxnResponse
-	AddTxnResponse(&resp, line)
+	addTxnResponse(&resp, line)
 	err = json.Unmarshal([]byte(line), &resp)
 	return &resp, err
 }
 
-// AddTxnResponse looks for ResponseOp json tags and adds the objects for json decoding
-func AddTxnResponse(resp *clientv3.TxnResponse, jsonData string) {
+// addTxnResponse looks for ResponseOp json tags and adds the objects for json decoding
+func addTxnResponse(resp *clientv3.TxnResponse, jsonData string) {
 	if resp == nil {
 		return
 	}
@@ -345,7 +413,9 @@ func (ctl *EtcdctlV3) flags() map[string]string {
 		}
 	}
 	fmap["endpoints"] = strings.Join(ctl.endpoints, ",")
-	if !ctl.authConfig.Empty() {
+	if ctl.authConfig.Token != "" {
+		fmap["auth-jwt-token"] = ctl.authConfig.Token
+	} else if !ctl.authConfig.Empty() {
 		fmap["user"] = ctl.authConfig.Username + ":" + ctl.authConfig.Password
 	}
 	return fmap

@@ -63,8 +63,8 @@ func readRaw(fromIndex *uint64, waldir string, out io.Writer) {
 				crcDesync = true
 			}
 			printRec(&rec, fromIndex, out)
-			if rec.Type == wal.CrcType {
-				decoder.UpdateCRC(rec.Crc)
+			if rec.GetType() == wal.CrcType {
+				decoder.UpdateCRC(rec.GetCrc())
 				crcDesync = false
 			}
 			continue
@@ -75,21 +75,20 @@ func readRaw(fromIndex *uint64, waldir string, out io.Writer) {
 		} else if errors.Is(err, io.ErrUnexpectedEOF) {
 			fmt.Fprintf(out, "ErrUnexpectedEOF: The last record might be corrupted, error: %v.\n", err)
 			break
-		} else {
-			log.Printf("Error: Reading failed: %v", err)
-			break
 		}
+		log.Printf("Error: Reading failed: %v", err)
+		break
 	}
 }
 
 func printRec(rec *walpb.Record, fromIndex *uint64, out io.Writer) {
-	switch rec.Type {
+	switch rec.GetType() {
 	case wal.MetadataType:
 		var metadata etcdserverpb.Metadata
 		pbutil.MustUnmarshal(&metadata, rec.Data)
 		fmt.Fprintf(out, "Metadata: %s\n", metadata.String())
 	case wal.CrcType:
-		fmt.Fprintf(out, "CRC: %d\n", rec.Crc)
+		fmt.Fprintf(out, "CRC: %d\n", rec.GetCrc())
 	case wal.EntryType:
 		e := wal.MustUnmarshalEntry(rec.Data)
 		if fromIndex == nil || e.Index >= *fromIndex {
@@ -98,7 +97,7 @@ func printRec(rec *walpb.Record, fromIndex *uint64, out io.Writer) {
 	case wal.SnapshotType:
 		var snap walpb.Snapshot
 		pbutil.MustUnmarshal(&snap, rec.Data)
-		if fromIndex == nil || snap.Index >= *fromIndex {
+		if fromIndex == nil || snap.GetIndex() >= *fromIndex {
 			fmt.Fprintf(out, "Snapshot: %s\n", snap.String())
 		}
 	case wal.StateType:
@@ -108,6 +107,6 @@ func printRec(rec *walpb.Record, fromIndex *uint64, out io.Writer) {
 			fmt.Fprintf(out, "HardState: %s\n", state.String())
 		}
 	default:
-		log.Printf("Unexpected WAL log type: %d", rec.Type)
+		log.Printf("Unexpected WAL log type: %d", rec.GetType())
 	}
 }

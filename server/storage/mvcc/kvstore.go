@@ -82,6 +82,7 @@ type store struct {
 
 // NewStore returns a new store. It is useful to create a store inside
 // mvcc pkg. It should only be used for testing externally.
+// revive:disable-next-line:unexported-return this is used internally in the mvcc pkg
 func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfig) *store {
 	if lg == nil {
 		lg = zap.NewNop()
@@ -458,9 +459,10 @@ func restoreIntoIndex(lg *zap.Logger, idx index) (chan<- revKeyValue, <-chan int
 			}
 
 			rev := BytesToRev(rkv.key)
-			verify.Verify(func() {
-				if rev.Main < currentRev {
-					panic(fmt.Errorf("revision %d shouldn't be less than the previous revision %d", rev.Main, currentRev))
+			verify.Verify("revision shouldn't be less than the previous revision", func() (bool, map[string]any) {
+				return rev.Main >= currentRev, map[string]any{
+					"revision":          rev.Main,
+					"previous revision": currentRev,
 				}
 			})
 			currentRev = rev.Main
@@ -473,8 +475,12 @@ func restoreIntoIndex(lg *zap.Logger, idx index) (chan<- revKeyValue, <-chan int
 					continue
 				}
 				ki.put(lg, rev.Main, rev.Sub)
-			} else if !isTombstone(rkv.key) {
-				ki.restore(lg, Revision{Main: rkv.kv.CreateRevision}, rev, rkv.kv.Version)
+			} else {
+				if isTombstone(rkv.key) {
+					ki.restoreTombstone(lg, rev.Main, rev.Sub)
+				} else {
+					ki.restore(lg, Revision{Main: rkv.kv.CreateRevision}, rev, rkv.kv.Version)
+				}
 				idx.Insert(ki)
 				kiCache[rkv.kstr] = ki
 			}

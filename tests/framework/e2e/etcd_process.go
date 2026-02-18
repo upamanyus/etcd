@@ -31,6 +31,7 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"go.uber.org/zap"
 
+	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/expect"
 	"go.etcd.io/etcd/pkg/v3/proxy"
@@ -58,6 +59,8 @@ type EtcdProcess interface {
 	LazyFS() *LazyFS
 	Logs() LogsExpect
 	Kill() error
+	Pause() error
+	Resume() error
 }
 
 type LogsExpect interface {
@@ -102,7 +105,7 @@ type EtcdServerProcessConfig struct {
 	Proxy         *proxy.ServerConfig
 }
 
-func NewEtcdServerProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*EtcdServerProcess, error) {
+func NewEtcdServerProcess(tb testing.TB, cfg *EtcdServerProcessConfig) (*EtcdServerProcess, error) {
 	if !fileutil.Exist(cfg.ExecPath) {
 		return nil, fmt.Errorf("could not find etcd binary: %s", cfg.ExecPath)
 	}
@@ -122,7 +125,7 @@ func NewEtcdServerProcess(t testing.TB, cfg *EtcdServerProcessConfig) (*EtcdServ
 		}
 	}
 	if cfg.LazyFSEnabled {
-		ep.lazyfs = newLazyFS(cfg.lg, cfg.DataDirPath, t)
+		ep.lazyfs = newLazyFS(cfg.lg, cfg.DataDirPath, tb)
 	}
 	return ep, nil
 }
@@ -271,7 +274,20 @@ func (ep *EtcdServerProcess) Logs() LogsExpect {
 
 func (ep *EtcdServerProcess) Kill() error {
 	ep.cfg.lg.Info("killing server...", zap.String("name", ep.cfg.Name))
+	if ep.proc == nil {
+		return nil
+	}
 	return ep.proc.Signal(syscall.SIGKILL)
+}
+
+func (ep *EtcdServerProcess) Pause() error {
+	ep.cfg.lg.Info("Pausing server...", zap.String("name", ep.cfg.Name))
+	return ep.proc.Signal(syscall.SIGSTOP)
+}
+
+func (ep *EtcdServerProcess) Resume() error {
+	ep.cfg.lg.Info("Resuming server...", zap.String("name", ep.cfg.Name))
+	return ep.proc.Signal(syscall.SIGCONT)
 }
 
 func (ep *EtcdServerProcess) Wait(ctx context.Context) error {
@@ -320,7 +336,7 @@ func (ep *EtcdServerProcess) IsRunning() bool {
 func AssertProcessLogs(t *testing.T, ep EtcdProcess, expectLog string) {
 	t.Helper()
 	var err error
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	_, err = ep.Logs().ExpectWithContext(ctx, expect.ExpectedResponse{Value: expectLog})
 	if err != nil {
@@ -530,4 +546,12 @@ func CouldSetSnapshotCatchupEntries(execPath string) bool {
 	// snapshot-catchup-entries flag was backported in https://github.com/etcd-io/etcd/pull/17808
 	v3_5_14 := semver.Version{Major: 3, Minor: 5, Patch: 14}
 	return v.Compare(v3_5_14) >= 0
+}
+
+func IsSnapshotCatchupEntriesFlagAvailable(execPath string) bool {
+	v, err := GetVersionFromBinary(execPath)
+	if err != nil {
+		return false
+	}
+	return !v.LessThan(version.V3_6)
 }

@@ -16,7 +16,6 @@ package validate
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -24,7 +23,6 @@ import (
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/tests/v3/robustness/model"
-	"go.etcd.io/etcd/tests/v3/robustness/report"
 )
 
 var (
@@ -32,32 +30,46 @@ var (
 	errFutureRevRespRequested = errors.New("request about a future rev with response")
 )
 
-func validateLinearizableOperationsAndVisualize(lg *zap.Logger, operations []porcupine.Operation, timeout time.Duration) (result porcupine.CheckResult, visualize func(basepath string) error) {
+func validateLinearizableOperationsAndVisualize(lg *zap.Logger, operations []porcupine.Operation, timeout time.Duration) LinearizationResult {
 	lg.Info("Validating linearizable operations", zap.Duration("timeout", timeout))
 	start := time.Now()
-	result, info := porcupine.CheckOperationsVerbose(model.NonDeterministicModel, operations, timeout)
-	switch result {
-	case porcupine.Illegal:
-		lg.Error("Linearization failed", zap.Duration("duration", time.Since(start)))
-	case porcupine.Unknown:
-		lg.Error("Linearization has timed out", zap.Duration("duration", time.Since(start)))
+	check, info := porcupine.CheckOperationsVerbose(model.NonDeterministicModel, operations, timeout)
+	result := LinearizationResult{
+		Info:  info,
+		Model: model.NonDeterministicModel,
+	}
+	switch check {
 	case porcupine.Ok:
+		result.Status = Success
 		lg.Info("Linearization success", zap.Duration("duration", time.Since(start)))
+	case porcupine.Unknown:
+		result.Status = Failure
+		result.Message = "timed out"
+		result.Timeout = true
+		lg.Error("Linearization timed out", zap.Duration("duration", time.Since(start)))
+	case porcupine.Illegal:
+		result.Status = Failure
+		result.Message = "illegal"
+		lg.Error("Linearization illegal", zap.Duration("duration", time.Since(start)))
 	default:
-		panic(fmt.Sprintf("Unknown Linearization result %s", result))
+		result.Status = Failure
+		result.Message = "unknown"
 	}
-	return result, func(path string) error {
-		lg.Info("Saving visualization", zap.String("path", path))
-		err := porcupine.VisualizePath(model.NonDeterministicModel, info, path)
-		if err != nil {
-			return fmt.Errorf("failed to visualize, err: %w", err)
-		}
-		return nil
-	}
+	return result
 }
 
-func validateSerializableOperations(lg *zap.Logger, operations []porcupine.Operation, replay *model.EtcdReplay) (lastErr error) {
+func validateSerializableOperations(lg *zap.Logger, operations []porcupine.Operation, replay *model.EtcdReplay) Result {
 	lg.Info("Validating serializable operations")
+	start := time.Now()
+	err := validateSerializableOperationsError(lg, operations, replay)
+	if err != nil {
+		lg.Error("Serializable validation failed", zap.Duration("duration", time.Since(start)), zap.Error(err))
+	}
+	lg.Info("Serializable validation success", zap.Duration("duration", time.Since(start)))
+	return ResultFromError(err)
+}
+
+func validateSerializableOperationsError(lg *zap.Logger, operations []porcupine.Operation, replay *model.EtcdReplay) (lastErr error) {
 	for _, read := range operations {
 		request := read.Input.(model.EtcdRequest)
 		response := read.Output.(model.MaybeEtcdResponse)
@@ -67,19 +79,6 @@ func validateSerializableOperations(lg *zap.Logger, operations []porcupine.Opera
 		}
 	}
 	return lastErr
-}
-
-func filterSerializableOperations(clients []report.ClientReport) []porcupine.Operation {
-	resp := []porcupine.Operation{}
-	for _, client := range clients {
-		for _, op := range client.KeyValue {
-			request := op.Input.(model.EtcdRequest)
-			if request.Type == model.Range && request.Range.Revision != 0 {
-				resp = append(resp, op)
-			}
-		}
-	}
-	return resp
 }
 
 func validateSerializableRead(lg *zap.Logger, replay *model.EtcdReplay, request model.EtcdRequest, response model.MaybeEtcdResponse) error {

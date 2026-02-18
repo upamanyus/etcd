@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/tests/v3/framework/config"
 )
 
@@ -27,15 +29,14 @@ func TestWaitLeader(t *testing.T) {
 
 	for _, tc := range clusterTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
 
 			leader := clus.WaitLeader(t)
-			if leader < 0 || leader >= len(clus.Members()) {
-				t.Fatalf("WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", leader, len(clus.Members()))
-			}
+			require.GreaterOrEqualf(t, leader, 0, "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", leader, len(clus.Members()))
+			require.Lessf(t, leader, len(clus.Members()), "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", leader, len(clus.Members()))
 		})
 	}
 }
@@ -55,25 +56,21 @@ func TestWaitLeader_MemberStop(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
 
 			lead1 := clus.WaitLeader(t)
-			if lead1 < 0 || lead1 >= len(clus.Members()) {
-				t.Fatalf("WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead1, len(clus.Members()))
-			}
+			require.GreaterOrEqualf(t, lead1, 0, "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead1, len(clus.Members()))
+			require.Lessf(t, lead1, len(clus.Members()), "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead1, len(clus.Members()))
 
 			clus.Members()[lead1].Stop()
 			lead2 := clus.WaitLeader(t)
-			if lead2 < 0 || lead2 >= len(clus.Members()) {
-				t.Fatalf("WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead2, len(clus.Members()))
-			}
+			require.GreaterOrEqualf(t, lead2, 0, "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead2, len(clus.Members()))
+			require.Lessf(t, lead2, len(clus.Members()), "WaitLeader failed for the leader index (%d) is out of range, cluster member count: %d", lead2, len(clus.Members()))
 
-			if lead1 == lead2 {
-				t.Fatalf("WaitLeader failed for the leader(index=%d) did not change as expected after a member stopped", lead1)
-			}
+			require.NotEqualf(t, lead1, lead2, "WaitLeader failed for the leader(index=%d) did not change as expected after a member stopped", lead1)
 		})
 	}
 }

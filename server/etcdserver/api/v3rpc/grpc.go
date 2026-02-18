@@ -17,9 +17,12 @@ package v3rpc
 import (
 	"crypto/tls"
 	"math"
+	"sync"
 
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -33,16 +36,24 @@ const (
 	maxSendBytes = math.MaxInt32
 )
 
+var (
+	metricsServerLock   sync.Mutex
+	metricsServerCached *grpc_prometheus.ServerMetrics
+)
+
 func Server(s *etcdserver.EtcdServer, tls *tls.Config, interceptor grpc.UnaryServerInterceptor, gopts ...grpc.ServerOption) *grpc.Server {
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.CustomCodec(&codec{}))
+	opts = append(opts, grpc.CustomCodec(&codec{})) //nolint:staticcheck // TODO: remove for a supported version
 	if tls != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTransportCredential(tls)))
 	}
+
+	serverMetrics := getServerMetrics(s.Cfg.Metrics, s.Cfg.Logger)
+
 	chainUnaryInterceptors := []grpc.UnaryServerInterceptor{
 		newLogUnaryInterceptor(s),
 		newUnaryInterceptor(s),
-		grpc_prometheus.UnaryServerInterceptor,
+		serverMetrics.UnaryServerInterceptor(),
 	}
 	if interceptor != nil {
 		chainUnaryInterceptors = append(chainUnaryInterceptors, interceptor)
@@ -50,12 +61,11 @@ func Server(s *etcdserver.EtcdServer, tls *tls.Config, interceptor grpc.UnarySer
 
 	chainStreamInterceptors := []grpc.StreamServerInterceptor{
 		newStreamInterceptor(s),
-		grpc_prometheus.StreamServerInterceptor,
+		serverMetrics.StreamServerInterceptor(),
 	}
 
-	if s.Cfg.ExperimentalEnableDistributedTracing {
-		chainUnaryInterceptors = append(chainUnaryInterceptors, otelgrpc.UnaryServerInterceptor(s.Cfg.ExperimentalTracerOptions...))
-		chainStreamInterceptors = append(chainStreamInterceptors, otelgrpc.StreamServerInterceptor(s.Cfg.ExperimentalTracerOptions...))
+	if s.Cfg.EnableDistributedTracing {
+		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler(s.Cfg.TracerOptions...)))
 	}
 
 	opts = append(opts, grpc.ChainUnaryInterceptor(chainUnaryInterceptors...))
@@ -79,7 +89,26 @@ func Server(s *etcdserver.EtcdServer, tls *tls.Config, interceptor grpc.UnarySer
 	pb.RegisterMaintenanceServer(grpcServer, NewMaintenanceServer(s, healthNotifier))
 
 	// set zero values for metrics registered for this grpc server
-	grpc_prometheus.Register(grpcServer)
+	serverMetrics.InitializeMetrics(grpcServer)
 
 	return grpcServer
+}
+
+func getServerMetrics(metricType string, lg *zap.Logger) *grpc_prometheus.ServerMetrics {
+	metricsServerLock.Lock()
+	defer metricsServerLock.Unlock()
+
+	if metricsServerCached == nil {
+		var mopts []grpc_prometheus.ServerMetricsOption
+		if metricType == "extensive" {
+			mopts = append(mopts, grpc_prometheus.WithServerHandlingTimeHistogram())
+		}
+		metricsServerCached = grpc_prometheus.NewServerMetrics(mopts...)
+		err := prometheus.Register(metricsServerCached)
+		if err != nil {
+			lg.Warn("etcdserver: failed to register grpc metrics", zap.Error(err))
+		}
+	}
+
+	return metricsServerCached
 }

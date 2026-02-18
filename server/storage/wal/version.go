@@ -19,7 +19,7 @@ import (
 	"strings"
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/proto" //nolint:staticcheck // TODO: remove for a supported version
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 
@@ -29,9 +29,15 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 )
 
+// Version defines the wal version interface.
+type Version interface {
+	// MinimalEtcdVersion returns minimal etcd version able to interpret WAL log.
+	MinimalEtcdVersion() *semver.Version
+}
+
 // ReadWALVersion reads remaining entries from opened WAL and returns struct
 // that implements schema.WAL interface.
-func ReadWALVersion(w *WAL) (*walVersion, error) {
+func ReadWALVersion(w *WAL) (Version, error) {
 	_, _, ents, err := w.ReadAll()
 	if err != nil {
 		return nil, err
@@ -102,18 +108,11 @@ func visitEntryData(entryType raftpb.EntryType, data []byte, visitor Visitor) er
 	case raftpb.EntryNormal:
 		var raftReq etcdserverpb.InternalRaftRequest
 		if err := pbutil.Unmarshaler(&raftReq).Unmarshal(data); err != nil {
-			// try V2 Request
-			var r etcdserverpb.Request
-			if pbutil.Unmarshaler(&r).Unmarshal(data) != nil {
-				// return original error
-				return err
-			}
-			msg = proto.MessageReflect(&r)
-			break
+			return err
 		}
 		msg = proto.MessageReflect(&raftReq)
-		if raftReq.ClusterVersionSet != nil {
-			ver, err := semver.NewVersion(raftReq.ClusterVersionSet.Ver)
+		if raftReq.DowngradeVersionTest != nil {
+			ver, err := semver.NewVersion(raftReq.DowngradeVersionTest.Ver)
 			if err != nil {
 				return err
 			}

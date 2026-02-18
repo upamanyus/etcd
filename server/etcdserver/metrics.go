@@ -44,12 +44,13 @@ var (
 		Name:      "leader_changes_seen_total",
 		Help:      "The number of leader changes seen.",
 	})
-	learnerPromoteFailed = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "learner_promote_failures",
-		Help:      "The total number of failed learner promotions (likely learner not ready) while this member is leader.",
-	},
+	learnerPromoteFailed = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "learner_promote_failures",
+			Help:      "The total number of failed learner promotions (likely learner not ready) while this member is leader.",
+		},
 		[]string{"Reason"},
 	)
 	learnerPromoteSucceed = prometheus.NewCounter(prometheus.CounterOpts{
@@ -106,35 +107,59 @@ var (
 		Name:      "read_indexes_failed_total",
 		Help:      "The total number of failed read indexes seen.",
 	})
+	requestDurationSec = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "request_duration_seconds",
+			Help:      "Response latency distribution in seconds for each type.",
+
+			// lowest bucket start of upper bound 0.001 sec (1 ms) with factor 2
+			// highest bucket start of 0.001 sec * 2^13 == 8.192 sec
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 14),
+		},
+		[]string{"type", "success"},
+	)
 	leaseExpired = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "etcd_debugging",
 		Subsystem: "server",
 		Name:      "lease_expired_total",
 		Help:      "The total number of expired leases.",
 	})
-
-	currentVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "version",
-		Help:      "Which version is running. 1 for 'server_version' label with current version.",
-	},
-		[]string{"server_version"})
-	currentGoVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "go_version",
-		Help:      "Which Go version server is running with. 1 for 'server_go_version' label with current version.",
-	},
-		[]string{"server_go_version"})
-	serverID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "etcd",
-		Subsystem: "server",
-		Name:      "id",
-		Help:      "Server or member ID in hexadecimal format. 1 for 'server_id' label with current ID.",
-	},
-		[]string{"server_id"})
-
+	currentVersion = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "version",
+			Help:      "Which version is running. 1 for 'server_version' label with current version.",
+		},
+		[]string{"server_version"},
+	)
+	currentGoVersion = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "go_version",
+			Help:      "Which Go version server is running with. 1 for 'server_go_version' label with current version.",
+		},
+		[]string{"server_go_version"},
+	)
+	serverID = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "etcd",
+			Subsystem: "server",
+			Name:      "id",
+			Help:      "Server or member ID in hexadecimal format. 1 for 'server_id' label with current ID.",
+		},
+		[]string{"server_id"},
+	)
+	serverFeatureEnabled = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "etcd_server_feature_enabled",
+			Help: "Whether or not a feature is enabled. 1 is enabled, 0 is not.",
+		},
+		[]string{"name", "stage"},
+	)
 	fdUsed = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "os",
 		Subsystem: "fd",
@@ -161,10 +186,12 @@ func init() {
 	prometheus.MustRegister(proposalsFailed)
 	prometheus.MustRegister(slowReadIndex)
 	prometheus.MustRegister(readIndexFailed)
+	prometheus.MustRegister(requestDurationSec)
 	prometheus.MustRegister(leaseExpired)
 	prometheus.MustRegister(currentVersion)
 	prometheus.MustRegister(currentGoVersion)
 	prometheus.MustRegister(serverID)
+	prometheus.MustRegister(serverFeatureEnabled)
 	prometheus.MustRegister(learnerPromoteSucceed)
 	prometheus.MustRegister(learnerPromoteFailed)
 	prometheus.MustRegister(fdUsed)

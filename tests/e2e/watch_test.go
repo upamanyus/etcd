@@ -91,17 +91,17 @@ func TestWatchDelayForPeriodicProgressNotification(t *testing.T) {
 		tc := tc
 		cfg := e2e.DefaultConfig()
 		cfg.ClusterSize = 1
-		cfg.ServerConfig.ExperimentalWatchProgressNotifyInterval = watchResponsePeriod
+		cfg.ServerConfig.WatchProgressNotifyInterval = watchResponsePeriod
 		cfg.Client = tc.client
 		cfg.ClientHTTPSeparate = tc.clientHTTPSeparate
 		t.Run(tc.name, func(t *testing.T) {
-			clus, err := e2e.NewEtcdProcessCluster(context.Background(), t, e2e.WithConfig(cfg))
+			clus, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 			require.NoError(t, err)
 			defer clus.Close()
 			c := newClient(t, clus.EndpointsGRPC(), tc.client)
-			require.NoError(t, fillEtcdWithData(context.Background(), c, tc.dbSizeBytes))
+			require.NoError(t, fillEtcdWithData(t.Context(), c, tc.dbSizeBytes))
 
-			ctx, cancel := context.WithTimeout(context.Background(), watchTestDuration)
+			ctx, cancel := context.WithTimeout(t.Context(), watchTestDuration)
 			defer cancel()
 			g := errgroup.Group{}
 			continuouslyExecuteGetAll(ctx, t, &g, c)
@@ -120,13 +120,13 @@ func TestWatchDelayForManualProgressNotification(t *testing.T) {
 		cfg.Client = tc.client
 		cfg.ClientHTTPSeparate = tc.clientHTTPSeparate
 		t.Run(tc.name, func(t *testing.T) {
-			clus, err := e2e.NewEtcdProcessCluster(context.Background(), t, e2e.WithConfig(cfg))
+			clus, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 			require.NoError(t, err)
 			defer clus.Close()
 			c := newClient(t, clus.EndpointsGRPC(), tc.client)
-			require.NoError(t, fillEtcdWithData(context.Background(), c, tc.dbSizeBytes))
+			require.NoError(t, fillEtcdWithData(t.Context(), c, tc.dbSizeBytes))
 
-			ctx, cancel := context.WithTimeout(context.Background(), watchTestDuration)
+			ctx, cancel := context.WithTimeout(t.Context(), watchTestDuration)
 			defer cancel()
 			g := errgroup.Group{}
 			continuouslyExecuteGetAll(ctx, t, &g, c)
@@ -157,13 +157,13 @@ func TestWatchDelayForEvent(t *testing.T) {
 		cfg.Client = tc.client
 		cfg.ClientHTTPSeparate = tc.clientHTTPSeparate
 		t.Run(tc.name, func(t *testing.T) {
-			clus, err := e2e.NewEtcdProcessCluster(context.Background(), t, e2e.WithConfig(cfg))
+			clus, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 			require.NoError(t, err)
 			defer clus.Close()
 			c := newClient(t, clus.EndpointsGRPC(), tc.client)
-			require.NoError(t, fillEtcdWithData(context.Background(), c, tc.dbSizeBytes))
+			require.NoError(t, fillEtcdWithData(t.Context(), c, tc.dbSizeBytes))
 
-			ctx, cancel := context.WithTimeout(context.Background(), watchTestDuration)
+			ctx, cancel := context.WithTimeout(t.Context(), watchTestDuration)
 			defer cancel()
 			g := errgroup.Group{}
 			g.Go(func() error {
@@ -270,14 +270,14 @@ func TestDeleteEventDrop_Issue18089(t *testing.T) {
 	cfg := e2e.DefaultConfig()
 	cfg.ClusterSize = 1
 	cfg.Client = e2e.ClientConfig{ConnectionType: e2e.ClientTLS}
-	clus, err := e2e.NewEtcdProcessCluster(context.Background(), t, e2e.WithConfig(cfg))
+	clus, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 	require.NoError(t, err)
 	defer clus.Close()
 
 	c := newClient(t, clus.EndpointsGRPC(), cfg.Client)
 	defer c.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	const (
 		key = "k"
 		v2  = "v2"
@@ -315,11 +315,11 @@ func TestDeleteEventDrop_Issue18089(t *testing.T) {
 	case watchResp := <-watchChan:
 		require.Len(t, watchResp.Events, 2)
 
-		require.Equal(t, mvccpb.DELETE, watchResp.Events[0].Type)
+		require.Equal(t, mvccpb.Event_DELETE, watchResp.Events[0].Type)
 		deletedKey := string(watchResp.Events[0].Kv.Key)
 		require.Equal(t, key, deletedKey)
 
-		require.Equal(t, mvccpb.PUT, watchResp.Events[1].Type)
+		require.Equal(t, mvccpb.Event_PUT, watchResp.Events[1].Type)
 
 		updatedKey := string(watchResp.Events[1].Kv.Key)
 		require.Equal(t, key, updatedKey)
@@ -345,14 +345,14 @@ func testStartWatcherFromCompactedRevision(t *testing.T, performCompactOnTombsto
 	e2e.BeforeTest(t)
 	cfg := e2e.DefaultConfig()
 	cfg.Client = e2e.ClientConfig{ConnectionType: e2e.ClientTLS}
-	clus, err := e2e.NewEtcdProcessCluster(context.Background(), t, e2e.WithConfig(cfg), e2e.WithClusterSize(1))
+	clus, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg), e2e.WithClusterSize(1))
 	require.NoError(t, err)
 	defer clus.Close()
 
 	c := newClient(t, clus.EndpointsGRPC(), cfg.Client)
 	defer c.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	key := "foo"
 	totalRev := 100
 
@@ -390,7 +390,7 @@ func testStartWatcherFromCompactedRevision(t *testing.T, performCompactOnTombsto
 				assert.NoError(t, derr)
 				respHeader = resp.Header
 
-				requestedValues = append(requestedValues, valueEvent{value: "", typ: mvccpb.DELETE})
+				requestedValues = append(requestedValues, valueEvent{value: "", typ: mvccpb.Event_DELETE})
 			} else {
 				value := fmt.Sprintf("%d", vi)
 
@@ -399,7 +399,7 @@ func testStartWatcherFromCompactedRevision(t *testing.T, performCompactOnTombsto
 				assert.NoError(t, perr)
 				respHeader = resp.Header
 
-				requestedValues = append(requestedValues, valueEvent{value: value, typ: mvccpb.PUT})
+				requestedValues = append(requestedValues, valueEvent{value: value, typ: mvccpb.Event_PUT})
 			}
 
 			lastRevision = respHeader.Revision
@@ -482,9 +482,83 @@ func testStartWatcherFromCompactedRevision(t *testing.T, performCompactOnTombsto
 		updatedKey := string(ev.Kv.Key)
 
 		require.Equal(t, key, updatedKey)
-		if expected.typ == mvccpb.PUT {
+		if expected.typ == mvccpb.Event_PUT {
 			updatedValue := string(ev.Kv.Value)
 			require.Equal(t, expected.value, updatedValue)
 		}
+	}
+}
+
+// TestResumeCompactionOnTombstone verifies whether a deletion event is preserved
+// when etcd restarts and resumes compaction on a key that only has a tombstone revision.
+func TestResumeCompactionOnTombstone(t *testing.T) {
+	e2e.BeforeTest(t)
+
+	ctx := t.Context()
+	compactBatchLimit := 5
+
+	cfg := e2e.DefaultConfig()
+	clus, err := e2e.NewEtcdProcessCluster(t.Context(),
+		t,
+		e2e.WithConfig(cfg),
+		e2e.WithClusterSize(1),
+		e2e.WithCompactionBatchLimit(compactBatchLimit),
+		e2e.WithGoFailEnabled(true),
+		e2e.WithWatchProcessNotifyInterval(100*time.Millisecond),
+	)
+	require.NoError(t, err)
+	defer clus.Close()
+
+	c1 := newClient(t, clus.EndpointsGRPC(), cfg.Client)
+	defer c1.Close()
+
+	keyPrefix := "/key-"
+	for i := 0; i < compactBatchLimit; i++ {
+		key := fmt.Sprintf("%s%d", keyPrefix, i)
+		value := fmt.Sprintf("%d", i)
+
+		t.Logf("PUT key=%s, val=%s", key, value)
+		_, err = c1.KV.Put(ctx, key, value)
+		require.NoError(t, err)
+	}
+
+	firstKey := keyPrefix + "0"
+	t.Logf("DELETE key=%s", firstKey)
+	deleteResp, err := c1.KV.Delete(ctx, firstKey)
+	require.NoError(t, err)
+
+	var deleteEvent *clientv3.Event
+	select {
+	case watchResp := <-c1.Watch(ctx, firstKey, clientv3.WithRev(deleteResp.Header.Revision)):
+		require.Len(t, watchResp.Events, 1)
+
+		require.Equal(t, mvccpb.Event_DELETE, watchResp.Events[0].Type)
+		deletedKey := string(watchResp.Events[0].Kv.Key)
+		require.Equal(t, firstKey, deletedKey)
+
+		deleteEvent = watchResp.Events[0]
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out getting watch response")
+	}
+
+	require.NoError(t, clus.Procs[0].Failpoints().SetupHTTP(ctx, "compactBeforeSetFinishedCompact", `panic`))
+
+	t.Logf("COMPACT rev=%d", deleteResp.Header.Revision)
+	_, err = c1.KV.Compact(ctx, deleteResp.Header.Revision, clientv3.WithCompactPhysical())
+	require.Error(t, err)
+
+	require.NoError(t, clus.Restart(ctx))
+
+	c2 := newClient(t, clus.EndpointsGRPC(), cfg.Client)
+	defer c2.Close()
+
+	watchChan := c2.Watch(ctx, firstKey, clientv3.WithRev(deleteResp.Header.Revision))
+	select {
+	case watchResp := <-watchChan:
+		require.Equal(t, []*clientv3.Event{deleteEvent}, watchResp.Events)
+	case <-time.After(100 * time.Millisecond):
+		// we care only about the first response, but have an
+		// escape hatch in case the watch response is delayed.
+		t.Fatal("timed out getting watch response")
 	}
 }

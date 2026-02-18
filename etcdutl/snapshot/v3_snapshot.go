@@ -126,6 +126,7 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 	defer db.Close()
 
 	h := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	seenKeys := make(map[string]struct{})
 
 	if err = db.View(func(tx *bolt.Tx) error {
 		// check snapshot file integrity first
@@ -175,8 +176,14 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 					if err != nil {
 						return fmt.Errorf("cannot unmarshal value, key: %q value: %q err: %w", k, v, err)
 					}
+					key := string(kv.Key)
+					// refer to https://etcd.io/docs/v3.5/learning/data_model/
+					if !mvcc.IsTombstone(k) {
+						seenKeys[key] = struct{}{}
+					} else {
+						delete(seenKeys, key)
+					}
 				}
-				ds.TotalKey++
 				return nil
 			}); err != nil {
 				return fmt.Errorf("error during bucket key iteration, name: %q err: %w", string(next), err)
@@ -187,6 +194,7 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
+	ds.TotalKey = len(seenKeys)
 	ds.Hash = h.Sum32()
 	return ds, nil
 }
@@ -511,8 +519,8 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		s.cl.AddMember(m, true)
 	}
 
-	m := s.cl.MemberByName(s.name)
-	md := &etcdserverpb.Metadata{NodeID: uint64(m.ID), ClusterID: uint64(s.cl.ID())}
+	m := s.cl.MemberByName(s.name) //nolint:staticcheck // See https://github.com/dominikh/go-tools/issues/1698
+	md := &etcdserverpb.Metadata{NodeID: new(uint64(m.ID)), ClusterID: new(uint64(s.cl.ID()))}
 	metadata, merr := md.Marshal()
 	if merr != nil {
 		return nil, merr
@@ -578,7 +586,7 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 	if err := sn.SaveSnap(raftSnap); err != nil {
 		return nil, err
 	}
-	snapshot := walpb.Snapshot{Index: commit, Term: term, ConfState: &confState}
+	snapshot := walpb.Snapshot{Index: &commit, Term: &term, ConfState: &confState}
 	return &hardState, w.SaveSnapshot(snapshot)
 }
 

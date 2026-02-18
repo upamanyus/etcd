@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,7 +60,7 @@ func TestRuntimeReconfigGrowClusterSize(t *testing.T) {
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
 			epc, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithClusterSize(tc.clusterSize))
@@ -101,7 +102,7 @@ func TestRuntimeReconfigDecreaseClusterSize(t *testing.T) {
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
 			epc, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithClusterSize(tc.clusterSize))
@@ -139,7 +140,7 @@ func TestRuntimeReconfigRollingUpgrade(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
 			epc, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithClusterSize(3))
@@ -177,7 +178,16 @@ func addMemberAsLearnerAndPromote(ctx context.Context, t *testing.T, epc *e2e.Et
 
 	id, err := epc.StartNewProc(ctx, nil, t, true /* addAsLearner */)
 	require.NoError(t, err)
-	_, err = epc.Etcdctl(e2e.WithEndpoints(endpoints)).MemberPromote(ctx, id)
+
+	attempt := 0
+	for attempt < 3 {
+		_, err = epc.Etcdctl(e2e.WithEndpoints(endpoints)).MemberPromote(ctx, id)
+		if err == nil || !strings.Contains(err.Error(), "can only promote a learner member which is in sync with leader") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+		attempt++
+	}
 	require.NoError(t, err)
 
 	newLearnerMemberProc := epc.Procs[len(epc.Procs)-1]

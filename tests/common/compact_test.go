@@ -16,7 +16,6 @@ package common
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +43,7 @@ func TestCompact(t *testing.T) {
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t)
 			defer clus.Close()
@@ -52,7 +51,7 @@ func TestCompact(t *testing.T) {
 			testutils.ExecuteUntil(ctx, t, func() {
 				kvs := []testutils.KV{{Key: "key", Val: "val1"}, {Key: "key", Val: "val2"}, {Key: "key", Val: "val3"}}
 				for i := range kvs {
-					err := cc.Put(ctx, kvs[i].Key, kvs[i].Val, config.PutOptions{})
+					_, err := cc.Put(ctx, kvs[i].Key, kvs[i].Val, config.PutOptions{})
 					require.NoErrorf(t, err, "compactTest #%d: put kv error", i)
 				}
 				get, err := cc.Get(ctx, "key", config.GetOptions{Revision: 3})
@@ -65,22 +64,10 @@ func TestCompact(t *testing.T) {
 				require.NoErrorf(t, err, "compactTest: Compact error")
 
 				_, err = cc.Get(ctx, "key", config.GetOptions{Revision: 3})
-				if err != nil {
-					if !strings.Contains(err.Error(), "required revision has been compacted") {
-						t.Fatalf("compactTest: Get compact key error (%v)", err)
-					}
-				} else {
-					t.Fatalf("expected '...has been compacted' error, got <nil>")
-				}
+				require.ErrorContainsf(t, err, "required revision has been compacted", "compactTest: Get compact key error (%v)", err)
 
 				_, err = cc.Compact(ctx, 2, tc.options)
-				if err != nil {
-					if !strings.Contains(err.Error(), "required revision has been compacted") {
-						t.Fatal(err)
-					}
-				} else {
-					t.Fatalf("expected '...has been compacted' error, got <nil>")
-				}
+				require.ErrorContains(t, err, "required revision has been compacted")
 			})
 		})
 	}

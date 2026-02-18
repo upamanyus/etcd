@@ -23,13 +23,16 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/featuregate"
 	"go.etcd.io/etcd/pkg/v3/flags"
 	"go.etcd.io/etcd/server/v3/embed"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
 	"go.etcd.io/etcd/server/v3/features"
 )
 
@@ -40,7 +43,7 @@ func TestConfigParsingMemberFlags(t *testing.T) {
 		"-max-wals=10",
 		"-max-snapshots=10",
 		"-snapshot-count=10",
-		"-experimental-snapshot-catchup-entries=1000",
+		"-snapshot-catchup-entries=1000",
 		"-listen-peer-urls=http://localhost:8000,https://localhost:8001",
 		"-listen-client-urls=http://localhost:7000,https://localhost:7001",
 		"-listen-client-http-urls=http://localhost:7002,https://localhost:7003",
@@ -64,7 +67,7 @@ func TestConfigFileMemberFields(t *testing.T) {
 		MaxWALFiles            uint   `json:"max-wals"`
 		Name                   string `json:"name"`
 		SnapshotCount          uint64 `json:"snapshot-count"`
-		SnapshotCatchUpEntries uint64 `json:"experimental-snapshot-catch-up-entries"`
+		SnapshotCatchUpEntries uint64 `json:"snapshot-catchup-entries"`
 		ListenPeerURLs         string `json:"listen-peer-urls"`
 		ListenClientURLs       string `json:"listen-client-urls"`
 		ListenClientHTTPURLs   string `json:"listen-client-http-urls"`
@@ -206,21 +209,21 @@ func TestConfigFileClusteringFlags(t *testing.T) {
 func TestConfigParsingConflictClusteringFlags(t *testing.T) {
 	conflictArgs := [][]string{
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery=http://example.com/abc",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-endpoints=http://example.com/abc",
 		},
 		{
-			"-discovery-srv=example.com",
-			"-discovery=http://example.com/abc",
+			"--discovery-srv=example.com",
+			"--discovery-endpoints=http://example.com/abc",
 		},
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery-srv=example.com",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-srv=example.com",
 		},
 		{
-			"-initial-cluster=0=localhost:8000",
-			"-discovery=http://example.com/abc",
-			"-discovery-srv=example.com",
+			"--initial-cluster=0=localhost:8000",
+			"--discovery-endpoints=http://example.com/abc",
+			"--discovery-srv=example.com",
 		},
 	}
 
@@ -234,17 +237,21 @@ func TestConfigParsingConflictClusteringFlags(t *testing.T) {
 
 func TestConfigFileConflictClusteringFlags(t *testing.T) {
 	tests := []struct {
-		InitialCluster string `json:"initial-cluster"`
-		DNSCluster     string `json:"discovery-srv"`
-		Durl           string `json:"discovery"`
+		InitialCluster string                      `json:"initial-cluster"`
+		DNSCluster     string                      `json:"discovery-srv"`
+		DiscoveryCfg   v3discovery.DiscoveryConfig `json:"discovery-config"`
 	}{
 		{
 			InitialCluster: "0=localhost:8000",
-			Durl:           "http://example.com/abc",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
 		},
 		{
 			DNSCluster: "example.com",
-			Durl:       "http://example.com/abc",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
 		},
 		{
 			InitialCluster: "0=localhost:8000",
@@ -252,8 +259,10 @@ func TestConfigFileConflictClusteringFlags(t *testing.T) {
 		},
 		{
 			InitialCluster: "0=localhost:8000",
-			Durl:           "http://example.com/abc",
-			DNSCluster:     "example.com",
+			DiscoveryCfg: v3discovery.DiscoveryConfig{
+				ConfigSpec: clientv3.ConfigSpec{Endpoints: []string{"http://example.com/abc"}},
+			},
+			DNSCluster: "example.com",
 		},
 	}
 
@@ -282,29 +291,28 @@ func TestConfigParsingMissedAdvertiseClientURLsFlag(t *testing.T) {
 	}{
 		{
 			[]string{
-				"-initial-cluster=infra1=http://127.0.0.1:2380",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--initial-cluster=infra1=http://127.0.0.1:2380",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-discovery-srv=example.com",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--discovery-srv=example.com",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-discovery=http://example.com/abc",
-				"-discovery-fallback=exit",
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--discovery-fallback=exit",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
 		{
 			[]string{
-				"-listen-client-urls=http://127.0.0.1:2379",
+				"--listen-client-urls=http://127.0.0.1:2379",
 			},
 			embed.ErrUnsetAdvertiseClientURLsFlag,
 		},
@@ -329,9 +337,8 @@ func TestConfigIsNewCluster(t *testing.T) {
 	for i, tt := range tests {
 		cfg := newConfig()
 		args := []string{"--initial-cluster-state", tests[i].state}
-		if err := cfg.parse(args); err != nil {
-			t.Fatalf("#%d: unexpected clusterState.Set error: %v", i, err)
-		}
+		err := cfg.parse(args)
+		require.NoErrorf(t, err, "#%d: unexpected clusterState.Set error: %v", i, err)
 		if g := cfg.ec.IsNewCluster(); g != tt.wIsNew {
 			t.Errorf("#%d: isNewCluster = %v, want %v", i, g, tt.wIsNew)
 		}
@@ -410,46 +417,16 @@ func TestParseFeatureGateFlags(t *testing.T) {
 			name: "default",
 			expectedFeatures: map[featuregate.Feature]bool{
 				features.StopGRPCServiceOnDefrag: false,
-				features.DistributedTracing:      false,
-			},
-		},
-		{
-			name: "cannot set both experimental flag and feature gate flag",
-			args: []string{
-				"--experimental-stop-grpc-service-on-defrag=false",
-				"--feature-gates=StopGRPCServiceOnDefrag=true",
-			},
-			expectErr: true,
-		},
-		{
-			name: "ok to set different experimental flag and feature gate flag",
-			args: []string{
-				"--experimental-stop-grpc-service-on-defrag=true",
-				"--feature-gates=DistributedTracing=true",
-			},
-			expectedFeatures: map[featuregate.Feature]bool{
-				features.StopGRPCServiceOnDefrag: true,
-				features.DistributedTracing:      true,
-			},
-		},
-		{
-			name: "can set feature gate from experimental flag",
-			args: []string{
-				"--experimental-stop-grpc-service-on-defrag=true",
-			},
-			expectedFeatures: map[featuregate.Feature]bool{
-				features.StopGRPCServiceOnDefrag: true,
-				features.DistributedTracing:      false,
 			},
 		},
 		{
 			name: "can set feature gate from feature gate flag",
 			args: []string{
-				"--feature-gates=StopGRPCServiceOnDefrag=true,DistributedTracing=true",
+				"--feature-gates=StopGRPCServiceOnDefrag=true,InitialCorruptCheck=true",
 			},
 			expectedFeatures: map[featuregate.Feature]bool{
 				features.StopGRPCServiceOnDefrag: true,
-				features.DistributedTracing:      true,
+				features.InitialCorruptCheck:     true,
 			},
 		},
 	}
@@ -459,9 +436,7 @@ func TestParseFeatureGateFlags(t *testing.T) {
 			cfg := newConfig()
 			err := cfg.parse(tc.args)
 			if tc.expectErr {
-				if err == nil {
-					t.Fatal("expect parse error")
-				}
+				require.Errorf(t, err, "expect parse error")
 				return
 			}
 			if err != nil {
@@ -476,101 +451,8 @@ func TestParseFeatureGateFlags(t *testing.T) {
 	}
 }
 
-// TestCompactHashCheckTimeFlagMigration tests the migration from
-// --experimental-compact-hash-check-time to --compact-hash-check-time
-// TODO: delete in v3.7
-func TestCompactHashCheckTimeFlagMigration(t *testing.T) {
-	testCases := []struct {
-		name                             string
-		compactHashCheckTime             string
-		experimentalCompactHashCheckTime string
-		useConfigFile                    bool
-		expectErr                        bool
-		expectedCompactHashCheckTime     time.Duration
-	}{
-		{
-			name:                         "default",
-			expectedCompactHashCheckTime: time.Minute,
-		},
-		{
-			name:                             "cannot set both experimental flag and non experimental flag",
-			compactHashCheckTime:             "2m",
-			experimentalCompactHashCheckTime: "3m",
-			expectErr:                        true,
-		},
-		{
-			name:                             "can set experimental flag",
-			experimentalCompactHashCheckTime: "3m",
-			expectedCompactHashCheckTime:     3 * time.Minute,
-		},
-		{
-			name:                         "can set non experimental flag",
-			compactHashCheckTime:         "2m",
-			expectedCompactHashCheckTime: 2 * time.Minute,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			cmdLineArgs := []string{}
-			yc := struct {
-				ExperimentalCompactHashCheckTime time.Duration `json:"experimental-compact-hash-check-time,omitempty"`
-				CompactHashCheckTime             time.Duration `json:"compact-hash-check-time,omitempty"`
-			}{}
-
-			if tc.compactHashCheckTime != "" {
-				cmdLineArgs = append(cmdLineArgs, fmt.Sprintf("--compact-hash-check-time=%s", tc.compactHashCheckTime))
-				compactHashCheckTime, err := time.ParseDuration(tc.compactHashCheckTime)
-				if err != nil {
-					t.Fatal(err)
-				}
-				yc.CompactHashCheckTime = compactHashCheckTime
-			}
-
-			if tc.experimentalCompactHashCheckTime != "" {
-				cmdLineArgs = append(cmdLineArgs, fmt.Sprintf("--experimental-compact-hash-check-time=%s", tc.experimentalCompactHashCheckTime))
-				experimentalCompactHashCheckTime, err := time.ParseDuration(tc.experimentalCompactHashCheckTime)
-				if err != nil {
-					t.Fatal(err)
-				}
-				yc.ExperimentalCompactHashCheckTime = experimentalCompactHashCheckTime
-			}
-
-			b, err := yaml.Marshal(&yc)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			tmpfile := mustCreateCfgFile(t, b)
-			defer os.Remove(tmpfile.Name())
-
-			cfgFromCmdLine := newConfig()
-			errFromCmdLine := cfgFromCmdLine.parse(cmdLineArgs)
-
-			cfgFromFile := newConfig()
-			errFromFile := cfgFromFile.parse([]string{fmt.Sprintf("--config-file=%s", tmpfile.Name())})
-
-			if tc.expectErr {
-				if errFromCmdLine == nil || errFromFile == nil {
-					t.Fatal("expect parse error")
-				}
-				return
-			}
-			if errFromCmdLine != nil || errFromFile != nil {
-				t.Fatal(err)
-			}
-
-			if cfgFromCmdLine.ec.CompactHashCheckTime != tc.expectedCompactHashCheckTime {
-				t.Errorf("expected CompactHashCheckTime=%v, got %v", tc.expectedCompactHashCheckTime, cfgFromCmdLine.ec.CompactHashCheckTime)
-			}
-			if cfgFromFile.ec.CompactHashCheckTime != tc.expectedCompactHashCheckTime {
-				t.Errorf("expected CompactHashCheckTime=%v, got %v", tc.expectedCompactHashCheckTime, cfgFromFile.ec.CompactHashCheckTime)
-			}
-		})
-	}
-}
-
 func mustCreateCfgFile(t *testing.T, b []byte) *os.File {
-	tmpfile, err := os.CreateTemp("", "servercfg")
+	tmpfile, err := os.CreateTemp(t.TempDir(), "servercfg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,5 +533,67 @@ func validateClusteringFlags(t *testing.T, cfg *config) {
 	}
 	if !reflect.DeepEqual(cfg.ec.AdvertiseClientUrls, wcfg.ec.AdvertiseClientUrls) {
 		t.Errorf("advertise-client-urls = %v, want %v", cfg.ec.AdvertiseClientUrls, wcfg.ec.AdvertiseClientUrls)
+	}
+}
+
+func TestConfigFileDeprecatedOptions(t *testing.T) {
+	// Define a minimal config struct with only the fields we need
+	type configFileYAML struct {
+		SnapshotCount uint64 `json:"snapshot-count,omitempty"`
+		MaxSnapFiles  uint   `json:"max-snapshots,omitempty"`
+	}
+
+	testCases := []struct {
+		name           string
+		configFileYAML configFileYAML
+		expectedFlags  map[string]struct{}
+	}{
+		{
+			name:           "no deprecated options",
+			configFileYAML: configFileYAML{},
+			expectedFlags:  map[string]struct{}{},
+		},
+		{
+			name: "deprecated snapshot options",
+			configFileYAML: configFileYAML{
+				SnapshotCount: 10000,
+				MaxSnapFiles:  5,
+			},
+			expectedFlags: map[string]struct{}{
+				"max-snapshots": {},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create config file
+			b, err := yaml.Marshal(&tc.configFileYAML)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tmpfile := mustCreateCfgFile(t, b)
+			defer os.Remove(tmpfile.Name())
+
+			// Parse config
+			cfg := newConfig()
+			err = cfg.parse([]string{fmt.Sprintf("--config-file=%s", tmpfile.Name())})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Check which flags were set and marked as deprecated
+			foundFlags := make(map[string]struct{})
+			for flagName := range cfg.ec.FlagsExplicitlySet {
+				if _, ok := deprecatedFlags[flagName]; ok {
+					foundFlags[flagName] = struct{}{}
+				}
+			}
+
+			// Compare sets of flags
+			assert.Equalf(t, tc.expectedFlags, foundFlags, "deprecated flags mismatch - expected: %v, got: %v",
+				tc.expectedFlags, foundFlags)
+		})
 	}
 }

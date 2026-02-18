@@ -37,8 +37,6 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2discovery"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
 	servererrors "go.etcd.io/etcd/server/v3/etcdserver/errors"
@@ -76,8 +74,7 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 	}
 
 	haveWAL := wal.Exist(cfg.WALDir())
-	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
-	backend, err := bootstrapBackend(cfg, haveWAL, st, ss)
+	backend, err := bootstrapBackend(cfg, haveWAL)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +84,8 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 		if err = fileutil.IsDirWriteable(cfg.WALDir()); err != nil {
 			return nil, fmt.Errorf("cannot write to WAL directory: %w", err)
 		}
-		bwal = bootstrapWALFromSnapshot(cfg, backend.snapshot)
+		cfg.Logger.Info("Bootstrapping WAL from snapshot")
+		bwal = bootstrapWALFromSnapshot(cfg, backend.snapshot, backend.ci)
 	}
 
 	cfg.Logger.Info("bootstrapping cluster")
@@ -98,11 +96,25 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 	}
 
 	cfg.Logger.Info("bootstrapping storage")
-	s := bootstrapStorage(cfg, st, backend, bwal, cluster)
+	s := bootstrapStorage(cfg, backend, bwal, cluster)
 
 	if err = cluster.Finalize(cfg, s); err != nil {
 		backend.Close()
 		return nil, err
+	}
+
+	if haveWAL {
+		sn := s.wal.snapshot
+		if sn == nil {
+			sn = &raftpb.Snapshot{}
+		}
+		cs := buildConfStateFromV3store(cfg.Logger, backend.be)
+
+		sn.Metadata.ConfState = cs
+		s.wal.snapshot = sn
+
+		cfg.Logger.Info("Constructed a new raft snapshot from v3 state", zap.Uint64("index", sn.Metadata.Index),
+			zap.Uint64("term", sn.Metadata.Term), zap.String("confState", sn.Metadata.ConfState.String()))
 	}
 
 	cfg.Logger.Info("bootstrapping raft")
@@ -114,6 +126,25 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 		cluster: cluster,
 		raft:    raft,
 	}, nil
+}
+
+func buildConfStateFromV3store(lg *zap.Logger, be backend.Backend) raftpb.ConfState {
+	members, _ := schema.NewMembershipBackend(lg, be).MustReadMembersFromBackend()
+	var (
+		voters   []uint64
+		learners []uint64
+	)
+	for _, m := range members {
+		if m.IsLearner {
+			learners = append(learners, uint64(m.ID))
+		} else {
+			voters = append(voters, uint64(m.ID))
+		}
+	}
+	return raftpb.ConfState{
+		Voters:   voters,
+		Learners: learners,
+	}
 }
 
 type bootstrappedServer struct {
@@ -131,7 +162,6 @@ func (s *bootstrappedServer) Close() {
 type bootstrappedStorage struct {
 	backend *bootstrappedBackend
 	wal     *bootstrappedWAL
-	st      v2store.Store
 }
 
 func (s *bootstrappedStorage) Close() {
@@ -165,14 +195,13 @@ type bootstrappedRaft struct {
 	storage *raft.MemoryStorage
 }
 
-func bootstrapStorage(cfg config.ServerConfig, st v2store.Store, be *bootstrappedBackend, wal *bootstrappedWAL, cl *bootstrappedCluster) *bootstrappedStorage {
+func bootstrapStorage(cfg config.ServerConfig, be *bootstrappedBackend, wal *bootstrappedWAL, cl *bootstrappedCluster) *bootstrappedStorage {
 	if wal == nil {
 		wal = bootstrapNewWAL(cfg, cl)
 	}
 
 	return &bootstrappedStorage{
 		backend: be,
-		st:      st,
 		wal:     wal,
 	}
 }
@@ -198,7 +227,7 @@ func bootstrapSnapshot(cfg config.ServerConfig) *snap.Snapshotter {
 	return snap.New(cfg.Logger, cfg.SnapDir())
 }
 
-func bootstrapBackend(cfg config.ServerConfig, haveWAL bool, st v2store.Store, ss *snap.Snapshotter) (backend *bootstrappedBackend, err error) {
+func bootstrapBackend(cfg config.ServerConfig, haveWAL bool) (backend *bootstrappedBackend, err error) {
 	beExist := fileutil.Exist(cfg.BackendPath())
 	ci := cindex.NewConsistentIndex(nil)
 	beHooks := serverstorage.NewBackendHooks(cfg.Logger, ci)
@@ -210,18 +239,18 @@ func bootstrapBackend(cfg config.ServerConfig, haveWAL bool, st v2store.Store, s
 	}()
 	ci.SetBackend(be)
 	schema.CreateMetaBucket(be.BatchTx())
-	if cfg.ExperimentalBootstrapDefragThresholdMegabytes != 0 {
+	if cfg.BootstrapDefragThresholdMegabytes != 0 {
 		err = maybeDefragBackend(cfg, be)
 		if err != nil {
 			return nil, err
 		}
 	}
-	cfg.Logger.Debug("restore consistentIndex", zap.Uint64("index", ci.ConsistentIndex()))
+	cfg.Logger.Info("restore consistentIndex", zap.Uint64("index", ci.ConsistentIndex()))
 
 	// TODO(serathius): Implement schema setup in fresh storage
 	var snapshot *raftpb.Snapshot
 	if haveWAL {
-		snapshot, be, err = recoverSnapshot(cfg, st, be, beExist, beHooks, ci, ss)
+		snapshot, be, err = recoverSnapshot(cfg, be, beExist, beHooks, ci)
 		if err != nil {
 			return nil, err
 		}
@@ -254,15 +283,15 @@ func maybeDefragBackend(cfg config.ServerConfig, be backend.Backend) error {
 	size := be.Size()
 	sizeInUse := be.SizeInUse()
 	freeableMemory := uint(size - sizeInUse)
-	thresholdBytes := cfg.ExperimentalBootstrapDefragThresholdMegabytes * 1024 * 1024
+	thresholdBytes := cfg.BootstrapDefragThresholdMegabytes * 1024 * 1024
 	if freeableMemory < thresholdBytes {
 		cfg.Logger.Info("Skipping defragmentation",
 			zap.Int64("current-db-size-bytes", size),
 			zap.String("current-db-size", humanize.Bytes(uint64(size))),
 			zap.Int64("current-db-size-in-use-bytes", sizeInUse),
 			zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse))),
-			zap.Uint("experimental-bootstrap-defrag-threshold-bytes", thresholdBytes),
-			zap.String("experimental-bootstrap-defrag-threshold", humanize.Bytes(uint64(thresholdBytes))),
+			zap.Uint("bootstrap-defrag-threshold-bytes", thresholdBytes),
+			zap.String("bootstrap-defrag-threshold", humanize.Bytes(uint64(thresholdBytes))),
 		)
 		return nil
 	}
@@ -290,7 +319,7 @@ func bootstrapExistingClusterNoWAL(cfg config.ServerConfig, prt http.RoundTrippe
 	if err := cfg.VerifyJoinExisting(); err != nil {
 		return nil, err
 	}
-	cl, err := membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap, membership.WithMaxLearners(cfg.ExperimentalMaxLearners))
+	cl, err := membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap, membership.WithMaxLearners(cfg.MaxLearners))
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +334,7 @@ func bootstrapExistingClusterNoWAL(cfg config.ServerConfig, prt http.RoundTrippe
 		return nil, fmt.Errorf("incompatible with current running cluster")
 	}
 	scaleUpLearners := false
-	if err := membership.ValidateMaxLearnerConfig(cfg.ExperimentalMaxLearners, existingCluster.Members(), scaleUpLearners); err != nil {
+	if err := membership.ValidateMaxLearnerConfig(cfg.MaxLearners, existingCluster.Members(), scaleUpLearners); err != nil {
 		return nil, err
 	}
 	remotes := existingCluster.Members()
@@ -322,7 +351,7 @@ func bootstrapNewClusterNoWAL(cfg config.ServerConfig, prt http.RoundTripper) (*
 	if err := cfg.VerifyBootstrap(); err != nil {
 		return nil, err
 	}
-	cl, err := membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap, membership.WithMaxLearners(cfg.ExperimentalMaxLearners))
+	cl, err := membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap, membership.WithMaxLearners(cfg.MaxLearners))
 	if err != nil {
 		return nil, err
 	}
@@ -331,14 +360,8 @@ func bootstrapNewClusterNoWAL(cfg config.ServerConfig, prt http.RoundTripper) (*
 		return nil, fmt.Errorf("member %s has already been bootstrapped", m.ID)
 	}
 	if cfg.ShouldDiscover() {
-		var str string
-		if cfg.DiscoveryURL != "" {
-			cfg.Logger.Warn("V2 discovery is deprecated!")
-			str, err = v2discovery.JoinCluster(cfg.Logger, cfg.DiscoveryURL, cfg.DiscoveryProxy, m.ID, cfg.InitialPeerURLsMap.String())
-		} else {
-			cfg.Logger.Info("Bootstrapping cluster using v3 discovery.")
-			str, err = v3discovery.JoinCluster(cfg.Logger, &cfg.DiscoveryCfg, m.ID, cfg.InitialPeerURLsMap.String())
-		}
+		cfg.Logger.Info("Bootstrapping cluster using v3 discovery.")
+		str, err := v3discovery.JoinCluster(cfg.Logger, &cfg.DiscoveryCfg, m.ID, cfg.InitialPeerURLsMap.String())
 		if err != nil {
 			return nil, &servererrors.DiscoveryError{Op: "join", Err: err}
 		}
@@ -350,7 +373,7 @@ func bootstrapNewClusterNoWAL(cfg config.ServerConfig, prt http.RoundTripper) (*
 		if config.CheckDuplicateURL(urlsmap) {
 			return nil, fmt.Errorf("discovery cluster %s has duplicate url", urlsmap)
 		}
-		if cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, urlsmap, membership.WithMaxLearners(cfg.ExperimentalMaxLearners)); err != nil {
+		if cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, urlsmap, membership.WithMaxLearners(cfg.MaxLearners)); err != nil {
 			return nil, err
 		}
 	}
@@ -372,10 +395,10 @@ func bootstrapClusterWithWAL(cfg config.ServerConfig, meta *snapshotMetadata) (*
 			zap.String("wal-dir", cfg.WALDir()),
 		)
 	}
-	cl := membership.NewCluster(cfg.Logger, membership.WithMaxLearners(cfg.ExperimentalMaxLearners))
+	cl := membership.NewCluster(cfg.Logger, membership.WithMaxLearners(cfg.MaxLearners))
 
 	scaleUpLearners := false
-	if err := membership.ValidateMaxLearnerConfig(cfg.ExperimentalMaxLearners, cl.Members(), scaleUpLearners); err != nil {
+	if err := membership.ValidateMaxLearnerConfig(cfg.MaxLearners, cl.Members(), scaleUpLearners); err != nil {
 		return nil, err
 	}
 
@@ -386,35 +409,34 @@ func bootstrapClusterWithWAL(cfg config.ServerConfig, meta *snapshotMetadata) (*
 	}, nil
 }
 
-func recoverSnapshot(cfg config.ServerConfig, st v2store.Store, be backend.Backend, beExist bool, beHooks *serverstorage.BackendHooks, ci cindex.ConsistentIndexer, ss *snap.Snapshotter) (*raftpb.Snapshot, backend.Backend, error) {
+func recoverSnapshot(cfg config.ServerConfig, be backend.Backend, beExist bool, beHooks *serverstorage.BackendHooks, ci cindex.ConsistentIndexer) (*raftpb.Snapshot, backend.Backend, error) {
 	// Find a snapshot to start/restart a raft node
 	walSnaps, err := wal.ValidSnapshotEntries(cfg.Logger, cfg.WALDir())
 	if err != nil {
 		return nil, be, err
 	}
-	// snapshot files can be orphaned if etcd crashes after writing them but before writing the corresponding
-	// bwal log entries
-	snapshot, err := ss.LoadNewestAvailable(walSnaps)
-	if err != nil && !errors.Is(err, snap.ErrNoSnapshot) {
-		return nil, be, err
+
+	var snapshot *raftpb.Snapshot
+	if len(walSnaps) > 0 {
+		idx := len(walSnaps) - 1
+		snapshot = &raftpb.Snapshot{
+			Metadata: raftpb.SnapshotMetadata{
+				Term:  walSnaps[idx].GetTerm(),
+				Index: walSnaps[idx].GetIndex(),
+			},
+		}
+		if walSnaps[idx].ConfState != nil {
+			snapshot.Metadata.ConfState = *walSnaps[idx].ConfState
+		}
+		cfg.Logger.Info("constructed a snapshot from WAL record",
+			zap.Uint64("snapshot-index", snapshot.Metadata.Index),
+			zap.String("snapshot-size", humanize.Bytes(uint64(snapshot.Size()))),
+			zap.String("confState", snapshot.Metadata.ConfState.String()),
+			zap.Int("walSnaps-count", len(walSnaps)),
+		)
 	}
 
 	if snapshot != nil {
-		if err = st.Recovery(snapshot.Data); err != nil {
-			cfg.Logger.Panic("failed to recover from snapshot", zap.Error(err))
-		}
-
-		if err = serverstorage.AssertNoV2StoreContent(cfg.Logger, st, cfg.V2Deprecation); err != nil {
-			cfg.Logger.Error("illegal v2store content", zap.Error(err))
-			return nil, be, err
-		}
-
-		cfg.Logger.Info(
-			"recovered v2 store from snapshot",
-			zap.Uint64("snapshot-index", snapshot.Metadata.Index),
-			zap.String("snapshot-size", humanize.Bytes(uint64(snapshot.Size()))),
-		)
-
 		if be, err = serverstorage.RecoverSnapshotBackend(cfg, be, *snapshot, beExist, beHooks); err != nil {
 			cfg.Logger.Panic("failed to recover v3 backend from snapshot", zap.Error(err))
 		}
@@ -446,7 +468,6 @@ func (c *bootstrappedCluster) Finalize(cfg config.ServerConfig, s *bootstrappedS
 	if !s.wal.haveWAL {
 		c.cl.SetID(c.nodeID, c.cl.ID())
 	}
-	c.cl.SetStore(s.st)
 	c.cl.SetBackend(schema.NewMembershipBackend(cfg.Logger, s.backend.be))
 	if s.wal.haveWAL {
 		c.cl.Recover(api.UpdateCapability)
@@ -457,7 +478,7 @@ func (c *bootstrappedCluster) Finalize(cfg config.ServerConfig, s *bootstrappedS
 		}
 	}
 	scaleUpLearners := false
-	return membership.ValidateMaxLearnerConfig(cfg.ExperimentalMaxLearners, c.cl.Members(), scaleUpLearners)
+	return membership.ValidateMaxLearnerConfig(cfg.MaxLearners, c.cl.Members(), scaleUpLearners)
 }
 
 func (c *bootstrappedCluster) databaseFileMissing(s *bootstrappedStorage) bool {
@@ -551,7 +572,7 @@ func (b *bootstrappedRaft) newRaftNode(ss *snap.Snapshotter, wal *wal.WAL, cl *m
 	)
 }
 
-func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot) *bootstrappedWAL {
+func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot, ci cindex.ConsistentIndexer) *bootstrappedWAL {
 	wal, st, ents, snap, meta := openWALFromSnapshot(cfg, snapshot)
 	bwal := &bootstrappedWAL{
 		lg:       cfg.Logger,
@@ -564,6 +585,19 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot
 	}
 
 	if cfg.ForceNewCluster {
+		consistentIndex := ci.ConsistentIndex()
+		oldCommitIndex := bwal.st.Commit
+		// If only `HardState.Commit` increases, HardState won't be persisted
+		// to disk, even though the committed entries might have already been
+		// applied. This can result in consistent_index > CommitIndex.
+		//
+		// When restarting etcd with `--force-new-cluster`, all uncommitted
+		// entries are dropped. To avoid losing entries that were actually
+		// committed, we reset Commit to max(HardState.Commit, consistent_index).
+		//
+		// See: https://github.com/etcd-io/raft/pull/300 for more details.
+		bwal.st.Commit = max(oldCommitIndex, consistentIndex)
+
 		// discard the previously uncommitted entries
 		bwal.ents = bwal.CommitedEntries()
 		entries := bwal.NewConfigChangeEntries()
@@ -573,6 +607,7 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot
 			"forcing restart member",
 			zap.String("cluster-id", meta.clusterID.String()),
 			zap.String("local-member-id", meta.nodeID.String()),
+			zap.Uint64("wal-commit-index", oldCommitIndex),
 			zap.Uint64("commit-index", bwal.st.Commit),
 		)
 	} else {
@@ -592,7 +627,7 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot
 func openWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot) (*wal.WAL, *raftpb.HardState, []raftpb.Entry, *raftpb.Snapshot, *snapshotMetadata) {
 	var walsnap walpb.Snapshot
 	if snapshot != nil {
-		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
+		walsnap.Index, walsnap.Term = new(snapshot.Metadata.Index), new(snapshot.Metadata.Term)
 	}
 	repaired := false
 	for {
@@ -620,8 +655,8 @@ func openWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot) (*w
 		}
 		var metadata etcdserverpb.Metadata
 		pbutil.MustUnmarshal(&metadata, wmetadata)
-		id := types.ID(metadata.NodeID)
-		cid := types.ID(metadata.ClusterID)
+		id := types.ID(metadata.GetNodeID())
+		cid := types.ID(metadata.GetClusterID())
 		meta := &snapshotMetadata{clusterID: cid, nodeID: id}
 		return w, &st, ents, snapshot, meta
 	}
@@ -634,8 +669,8 @@ type snapshotMetadata struct {
 func bootstrapNewWAL(cfg config.ServerConfig, cl *bootstrappedCluster) *bootstrappedWAL {
 	metadata := pbutil.MustMarshal(
 		&etcdserverpb.Metadata{
-			NodeID:    uint64(cl.nodeID),
-			ClusterID: uint64(cl.cl.ID()),
+			NodeID:    new(uint64(cl.nodeID)),
+			ClusterID: new(uint64(cl.cl.ID())),
 		},
 	)
 	w, err := wal.Create(cfg.Logger, cfg.WALDir(), metadata)

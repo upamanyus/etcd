@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/metadata"
@@ -64,9 +65,7 @@ func TestNewAuthStoreRevision(t *testing.T) {
 	defer as.Close()
 	new := as.Revision()
 
-	if old != new {
-		t.Fatalf("expected revision %d, got %d", old, new)
-	}
+	require.Equalf(t, old, new, "expected revision %d, got %d", old, new)
 }
 
 // TestNewAuthStoreBcryptCost ensures that NewAuthStore uses default when given bcrypt-cost is invalid
@@ -80,9 +79,7 @@ func TestNewAuthStoreBcryptCost(t *testing.T) {
 	for _, invalidCost := range invalidCosts {
 		as := NewAuthStore(zaptest.NewLogger(t), newBackendMock(), tp, invalidCost)
 		defer as.Close()
-		if as.BcryptCost() != bcrypt.DefaultCost {
-			t.Fatalf("expected DefaultCost when bcryptcost is invalid")
-		}
+		require.Equalf(t, bcrypt.DefaultCost, as.BcryptCost(), "expected DefaultCost when bcryptcost is invalid")
 	}
 }
 
@@ -116,12 +113,14 @@ func setupAuthStore(t *testing.T) (store *authStore, teardownfunc func(t *testin
 
 	// The UserAdd function cannot generate old etcd version user data (user's option is nil)
 	// add special users through the underlying interface
-	addUserWithNoOption(as)
+	asImpl, ok := as.(*authStore)
+	require.Truef(t, ok, "addUserWithNoOption: needs an AuthStore implementation")
+	addUserWithNoOption(asImpl)
 
 	tearDown := func(_ *testing.T) {
 		as.Close()
 	}
-	return as, tearDown
+	return asImpl, tearDown
 }
 
 func addUserWithNoOption(as *authStore) {
@@ -136,7 +135,7 @@ func addUserWithNoOption(as *authStore) {
 	as.refreshRangePermCache(tx)
 }
 
-func enableAuthAndCreateRoot(as *authStore) error {
+func enableAuthAndCreateRoot(as AuthStore) error {
 	_, err := as.UserAdd(&pb.AuthUserAddRequest{Name: "root", HashedPassword: encodePassword("root"), Options: &authpb.UserAddOptions{NoPassword: false}})
 	if err != nil {
 		return err
@@ -162,12 +161,8 @@ func TestUserAdd(t *testing.T) {
 	const userName = "foo"
 	ua := &pb.AuthUserAddRequest{Name: userName, Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err := as.UserAdd(ua) // add an existing user
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
-	}
-	if !errors.Is(err, ErrUserAlreadyExist) {
-		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrUserAlreadyExist, err)
+	require.ErrorIsf(t, err, ErrUserAlreadyExist, "expected %v, got %v", ErrUserAlreadyExist, err)
 
 	ua = &pb.AuthUserAddRequest{Name: "", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err = as.UserAdd(ua) // add a user with empty name
@@ -175,9 +170,8 @@ func TestUserAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := as.rangePermCache[userName]; !ok {
-		t.Fatalf("user %s should be added but it doesn't exist in rangePermCache", userName)
-	}
+	_, ok := as.rangePermCache[userName]
+	require.Truef(t, ok, "user %s should be added but it doesn't exist in rangePermCache", userName)
 }
 
 func TestRecover(t *testing.T) {
@@ -188,9 +182,7 @@ func TestRecover(t *testing.T) {
 	as.enabled = false
 	as.Recover(as.be)
 
-	if !as.IsAuthEnabled() {
-		t.Fatalf("expected auth enabled got disabled")
-	}
+	require.Truef(t, as.IsAuthEnabled(), "expected auth enabled got disabled")
 }
 
 func TestRecoverWithEmptyRangePermCache(t *testing.T) {
@@ -202,19 +194,13 @@ func TestRecoverWithEmptyRangePermCache(t *testing.T) {
 	as.rangePermCache = map[string]*unifiedRangePermissions{}
 	as.Recover(as.be)
 
-	if !as.IsAuthEnabled() {
-		t.Fatalf("expected auth enabled got disabled")
-	}
+	require.Truef(t, as.IsAuthEnabled(), "expected auth enabled got disabled")
 
-	if len(as.rangePermCache) != 3 {
-		t.Fatalf("rangePermCache should have permission information for 3 users (\"root\" and \"foo\",\"foo-no-user-options\"), but has %d information", len(as.rangePermCache))
-	}
-	if _, ok := as.rangePermCache["root"]; !ok {
-		t.Fatal("user \"root\" should be created by setupAuthStore() but doesn't exist in rangePermCache")
-	}
-	if _, ok := as.rangePermCache["foo"]; !ok {
-		t.Fatal("user \"foo\" should be created by setupAuthStore() but doesn't exist in rangePermCache")
-	}
+	require.Lenf(t, as.rangePermCache, 3, "rangePermCache should have permission information for 3 users (\"root\" and \"foo\",\"foo-no-user-options\"), but has %d information", len(as.rangePermCache))
+	_, ok := as.rangePermCache["root"]
+	require.Truef(t, ok, "user \"root\" should be created by setupAuthStore() but doesn't exist in rangePermCache")
+	_, ok = as.rangePermCache["foo"]
+	require.Truef(t, ok, "user \"foo\" should be created by setupAuthStore() but doesn't exist in rangePermCache")
 }
 
 func TestCheckPassword(t *testing.T) {
@@ -223,12 +209,8 @@ func TestCheckPassword(t *testing.T) {
 
 	// auth a non-existing user
 	_, err := as.CheckPassword("foo-test", "bar")
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
-	}
-	if !errors.Is(err, ErrAuthFailed) {
-		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrAuthFailed, err)
+	require.ErrorIsf(t, err, ErrAuthFailed, "expected %v, got %v", ErrAuthFailed, err)
 
 	// auth an existing user with correct password
 	_, err = as.CheckPassword("foo", "bar")
@@ -238,12 +220,8 @@ func TestCheckPassword(t *testing.T) {
 
 	// auth an existing user but with wrong password
 	_, err = as.CheckPassword("foo", "")
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
-	}
-	if !errors.Is(err, ErrAuthFailed) {
-		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrAuthFailed, err)
+	require.ErrorIsf(t, err, ErrAuthFailed, "expected %v, got %v", ErrAuthFailed, err)
 }
 
 func TestUserDelete(t *testing.T) {
@@ -260,16 +238,11 @@ func TestUserDelete(t *testing.T) {
 
 	// delete a non-existing user
 	_, err = as.UserDelete(ud)
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
-	if !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrUserNotFound, err)
+	require.ErrorIsf(t, err, ErrUserNotFound, "expected %v, got %v", ErrUserNotFound, err)
 
-	if _, ok := as.rangePermCache[userName]; ok {
-		t.Fatalf("user %s should be deleted but it exists in rangePermCache", userName)
-	}
+	_, ok := as.rangePermCache[userName]
+	require.Falsef(t, ok, "user %s should be deleted but it exists in rangePermCache", userName)
 }
 
 func TestUserDeleteAndPermCache(t *testing.T) {
@@ -286,13 +259,10 @@ func TestUserDeleteAndPermCache(t *testing.T) {
 
 	// delete a non-existing user
 	_, err = as.UserDelete(ud)
-	if !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
+	require.ErrorIsf(t, err, ErrUserNotFound, "expected %v, got %v", ErrUserNotFound, err)
 
-	if _, ok := as.rangePermCache[deletedUserName]; ok {
-		t.Fatalf("user %s should be deleted but it exists in rangePermCache", deletedUserName)
-	}
+	_, ok := as.rangePermCache[deletedUserName]
+	require.Falsef(t, ok, "user %s should be deleted but it exists in rangePermCache", deletedUserName)
 
 	// add a new user
 	const newUser = "bar"
@@ -302,16 +272,15 @@ func TestUserDeleteAndPermCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := as.rangePermCache[newUser]; !ok {
-		t.Fatalf("user %s should exist but it doesn't exist in rangePermCache", deletedUserName)
-	}
+	_, ok = as.rangePermCache[newUser]
+	require.Truef(t, ok, "user %s should exist but it doesn't exist in rangePermCache", deletedUserName)
 }
 
 func TestUserChangePassword(t *testing.T) {
 	as, tearDown := setupAuthStore(t)
 	defer tearDown(t)
 
-	ctx1 := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx1 := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err := as.Authenticate(ctx1, "foo", "bar")
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +291,7 @@ func TestUserChangePassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx2 := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx2 := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err = as.Authenticate(ctx2, "foo", "baz")
 	if err != nil {
 		t.Fatal(err)
@@ -330,12 +299,8 @@ func TestUserChangePassword(t *testing.T) {
 
 	// change a non-existing user
 	_, err = as.UserChangePassword(&pb.AuthUserChangePasswordRequest{Name: "foo-test", HashedPassword: encodePassword("bar")})
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
-	if !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrUserNotFound, err)
+	require.ErrorIsf(t, err, ErrUserNotFound, "expected %v, got %v", ErrUserNotFound, err)
 
 	// change a user（user option is nil) password
 	_, err = as.UserChangePassword(&pb.AuthUserChangePasswordRequest{Name: "foo-no-user-options", HashedPassword: encodePassword("bar")})
@@ -393,21 +358,15 @@ func TestHasRole(t *testing.T) {
 
 	// checks role reflects correctly
 	hr := as.HasRole("foo", "role-test")
-	if !hr {
-		t.Fatal("expected role granted, got false")
-	}
+	require.Truef(t, hr, "expected role granted, got false")
 
 	// checks non existent role
 	hr = as.HasRole("foo", "non-existent-role")
-	if hr {
-		t.Fatal("expected role not found, got true")
-	}
+	require.Falsef(t, hr, "expected role not found, got true")
 
 	// checks non existent user
 	hr = as.HasRole("nouser", "role-test")
-	if hr {
-		t.Fatal("expected user not found got true")
-	}
+	require.Falsef(t, hr, "expected user not found got true")
 }
 
 func TestIsOpPermitted(t *testing.T) {
@@ -421,7 +380,7 @@ func TestIsOpPermitted(t *testing.T) {
 	}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}
@@ -470,9 +429,7 @@ func TestGetUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u == nil {
-		t.Fatal("expect user not nil, got nil")
-	}
+	require.NotNilf(t, u, "expect user not nil, got nil")
 	expected := []string{"role-test"}
 
 	assert.Equal(t, expected, u.Roles)
@@ -516,7 +473,7 @@ func TestRoleGrantPermission(t *testing.T) {
 	}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}
@@ -569,7 +526,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("Keys"),
 				RangeEnd: []byte("RangeEnd"),
 			},
@@ -578,7 +535,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: nil key",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      nil,
 				RangeEnd: []byte("RangeEnd"),
 			},
@@ -587,7 +544,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range: single key",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("Keys"),
 				RangeEnd: nil,
 			},
@@ -596,7 +553,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range: single key",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("Keys"),
 				RangeEnd: []byte{},
 			},
@@ -605,7 +562,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: empty (Key == RangeEnd)",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("a"),
 				RangeEnd: []byte("a"),
 			},
@@ -614,7 +571,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: empty (Key > RangeEnd)",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("b"),
 				RangeEnd: []byte("a"),
 			},
@@ -623,7 +580,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: length of key is 0",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte(""),
 				RangeEnd: []byte("a"),
 			},
@@ -632,7 +589,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: length of key is 0",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte(""),
 				RangeEnd: []byte(""),
 			},
@@ -641,7 +598,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "invalid range: length of key is 0",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte(""),
 				RangeEnd: []byte{0x00},
 			},
@@ -650,7 +607,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range: single key permission for []byte{0x00}",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte{0x00},
 				RangeEnd: []byte(""),
 			},
@@ -659,7 +616,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range: \"a\" or larger keys",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte("a"),
 				RangeEnd: []byte{0x00},
 			},
@@ -668,7 +625,7 @@ func TestRoleGrantInvalidPermission(t *testing.T) {
 		{
 			name: "valid range: the entire keys",
 			perm: &authpb.Permission{
-				PermType: authpb.WRITE,
+				PermType: authpb.Permission_WRITE,
 				Key:      []byte{0x00},
 				RangeEnd: []byte{0x00},
 			},
@@ -695,7 +652,7 @@ func TestRootRoleGrantPermission(t *testing.T) {
 	defer tearDown(t)
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}
@@ -714,7 +671,7 @@ func TestRootRoleGrantPermission(t *testing.T) {
 
 	// whatever grant permission to root, it always return root permission.
 	expectPerm := &authpb.Permission{
-		PermType: authpb.READWRITE,
+		PermType: authpb.Permission_READWRITE,
 		Key:      []byte{},
 		RangeEnd: []byte{0},
 	}
@@ -732,7 +689,7 @@ func TestRoleRevokePermission(t *testing.T) {
 	}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}
@@ -789,7 +746,7 @@ func TestUserRevokePermission(t *testing.T) {
 	}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("WriteKeyBegin"),
 		RangeEnd: []byte("WriteKeyEnd"),
 	}
@@ -801,18 +758,13 @@ func TestUserRevokePermission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := as.rangePermCache[userName]; !ok {
-		t.Fatalf("User %s should have its entry in rangePermCache", userName)
-	}
+	_, ok := as.rangePermCache[userName]
+	require.Truef(t, ok, "User %s should have its entry in rangePermCache", userName)
 	unifiedPerm := as.rangePermCache[userName]
 	pt1 := adt.NewBytesAffinePoint([]byte("WriteKeyBegin"))
-	if !unifiedPerm.writePerms.Contains(pt1) {
-		t.Fatal("rangePermCache should contain WriteKeyBegin")
-	}
+	require.Truef(t, unifiedPerm.writePerms.Contains(pt1), "rangePermCache should contain WriteKeyBegin")
 	pt2 := adt.NewBytesAffinePoint([]byte("OutOfRange"))
-	if unifiedPerm.writePerms.Contains(pt2) {
-		t.Fatal("rangePermCache should not contain OutOfRange")
-	}
+	require.Falsef(t, unifiedPerm.writePerms.Contains(pt2), "rangePermCache should not contain OutOfRange")
 
 	u, err := as.UserGet(&pb.AuthUserGetRequest{Name: userName})
 	if err != nil {
@@ -859,38 +811,38 @@ func TestAuthInfoFromCtx(t *testing.T) {
 	as, tearDown := setupAuthStore(t)
 	defer tearDown(t)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ai, err := as.AuthInfoFromCtx(ctx)
 	if err != nil && ai != nil {
 		t.Errorf("expected (nil, nil), got (%v, %v)", ai, err)
 	}
 
 	// as if it came from RPC
-	ctx = metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"tokens": "dummy"}))
+	ctx = metadata.NewIncomingContext(t.Context(), metadata.New(map[string]string{"tokens": "dummy"}))
 	ai, err = as.AuthInfoFromCtx(ctx)
 	if err != nil && ai != nil {
 		t.Errorf("expected (nil, nil), got (%v, %v)", ai, err)
 	}
 
-	ctx = context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx = context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	resp, err := as.Authenticate(ctx, "foo", "bar")
 	if err != nil {
 		t.Error(err)
 	}
 
-	ctx = metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "Invalid Token"}))
+	ctx = metadata.NewIncomingContext(t.Context(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "Invalid Token"}))
 	_, err = as.AuthInfoFromCtx(ctx)
 	if !errors.Is(err, ErrInvalidAuthToken) {
 		t.Errorf("expected %v, got %v", ErrInvalidAuthToken, err)
 	}
 
-	ctx = metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "Invalid.Token"}))
+	ctx = metadata.NewIncomingContext(t.Context(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "Invalid.Token"}))
 	_, err = as.AuthInfoFromCtx(ctx)
 	if !errors.Is(err, ErrInvalidAuthToken) {
 		t.Errorf("expected %v, got %v", ErrInvalidAuthToken, err)
 	}
 
-	ctx = metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: resp.Token}))
+	ctx = metadata.NewIncomingContext(t.Context(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: resp.Token}))
 	ai, err = as.AuthInfoFromCtx(ctx)
 	if err != nil {
 		t.Error(err)
@@ -905,7 +857,7 @@ func TestAuthDisable(t *testing.T) {
 	defer tearDown(t)
 
 	as.AuthDisable()
-	ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err := as.Authenticate(ctx, "foo", "bar")
 	if !errors.Is(err, ErrAuthNotEnabled) {
 		t.Errorf("expected %v, got %v", ErrAuthNotEnabled, err)
@@ -927,7 +879,7 @@ func TestIsAuthEnabled(t *testing.T) {
 	as.AuthEnable()
 
 	status := as.IsAuthEnabled()
-	ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, _ = as.Authenticate(ctx, "foo", "bar")
 	if status != true {
 		t.Errorf("expected %v, got %v", true, false)
@@ -955,7 +907,7 @@ func TestAuthInfoFromCtxRace(t *testing.T) {
 	donec := make(chan struct{})
 	go func() {
 		defer close(donec)
-		ctx := metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "test"}))
+		ctx := metadata.NewIncomingContext(t.Context(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "test"}))
 		as.AuthInfoFromCtx(ctx)
 	}()
 	as.UserAdd(&pb.AuthUserAddRequest{Name: "test", Options: &authpb.UserAddOptions{NoPassword: false}})
@@ -1003,12 +955,8 @@ func TestRecoverFromSnapshot(t *testing.T) {
 
 	ua := &pb.AuthUserAddRequest{Name: "foo", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err := as.UserAdd(ua) // add an existing user
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
-	}
-	if !errors.Is(err, ErrUserAlreadyExist) {
-		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrUserAlreadyExist, err)
+	require.ErrorIsf(t, err, ErrUserAlreadyExist, "expected %v, got %v", ErrUserAlreadyExist, err)
 
 	ua = &pb.AuthUserAddRequest{Name: "", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err = as.UserAdd(ua) // add a user with empty name
@@ -1025,9 +973,7 @@ func TestRecoverFromSnapshot(t *testing.T) {
 	as2 := NewAuthStore(zaptest.NewLogger(t), as.be, tp, bcrypt.MinCost)
 	defer as2.Close()
 
-	if !as2.IsAuthEnabled() {
-		t.Fatal("recovering authStore from existing backend failed")
-	}
+	require.Truef(t, as2.IsAuthEnabled(), "recovering authStore from existing backend failed")
 
 	ul, err := as.UserList(&pb.AuthUserListRequest{})
 	if err != nil {
@@ -1079,7 +1025,7 @@ func TestHammerSimpleAuthenticate(t *testing.T) {
 			go func(user string) {
 				defer wg.Done()
 				token := fmt.Sprintf("%s(%d)", user, i)
-				ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, token)
+				ctx := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, token)
 				if _, err := as.Authenticate(ctx, user, "123"); err != nil {
 					t.Error(err)
 				}
@@ -1160,16 +1106,14 @@ func testAuthInfoFromCtxWithRoot(t *testing.T, opts string) {
 		t.Fatal(err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	ctx = as.WithRoot(ctx)
 
 	ai, aerr := as.AuthInfoFromCtx(ctx)
 	if aerr != nil {
 		t.Fatal(err)
 	}
-	if ai == nil {
-		t.Fatal("expected non-nil *AuthInfo")
-	}
+	require.NotNilf(t, ai, "expected non-nil *AuthInfo")
 	if ai.Username != "root" {
 		t.Errorf("expected user name 'root', got %+v", ai)
 	}
@@ -1186,11 +1130,9 @@ func TestUserNoPasswordAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err = as.Authenticate(ctx, username, "")
-	if !errors.Is(err, ErrAuthFailed) {
-		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
-	}
+	require.ErrorIsf(t, err, ErrAuthFailed, "expected %v, got %v", ErrAuthFailed, err)
 }
 
 func TestUserAddWithOldLog(t *testing.T) {
@@ -1208,7 +1150,7 @@ func TestUserChangePasswordWithOldLog(t *testing.T) {
 	as, tearDown := setupAuthStore(t)
 	defer tearDown(t)
 
-	ctx1 := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx1 := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err := as.Authenticate(ctx1, "foo", "bar")
 	if err != nil {
 		t.Fatal(err)
@@ -1219,7 +1161,7 @@ func TestUserChangePasswordWithOldLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx2 := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	ctx2 := context.WithValue(context.WithValue(t.Context(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
 	_, err = as.Authenticate(ctx2, "foo", "baz")
 	if err != nil {
 		t.Fatal(err)
@@ -1227,10 +1169,6 @@ func TestUserChangePasswordWithOldLog(t *testing.T) {
 
 	// change a non-existing user
 	_, err = as.UserChangePassword(&pb.AuthUserChangePasswordRequest{Name: "foo-test", HashedPassword: encodePassword("bar")})
-	if err == nil {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
-	if !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected %v, got %v", ErrUserNotFound, err)
-	}
+	require.Errorf(t, err, "expected %v, got %v", ErrUserNotFound, err)
+	require.ErrorIsf(t, err, ErrUserNotFound, "expected %v, got %v", ErrUserNotFound, err)
 }

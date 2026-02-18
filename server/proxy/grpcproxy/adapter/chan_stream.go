@@ -16,6 +16,7 @@ package adapter
 
 import (
 	"context"
+	"maps"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -38,18 +39,16 @@ func (ss *chanServerStream) SendHeader(md metadata.MD) error {
 	}
 	outmd := make(map[string][]string)
 	for _, h := range append(ss.headers, md) {
-		for k, v := range h {
-			outmd[k] = v
-		}
+		maps.Copy(outmd, h)
 	}
 	select {
 	case ss.headerc <- outmd:
 		ss.headerc = nil
 		ss.headers = nil
 		return nil
-	case <-ss.Context().Done():
+	case <-ss.Context().Done(): //nolint:staticcheck // TODO: remove for a supported version
 	}
-	return ss.Context().Err()
+	return ss.Context().Err() //nolint:staticcheck // TODO: remove for a supported version
 }
 
 func (ss *chanServerStream) SetHeader(md metadata.MD) error {

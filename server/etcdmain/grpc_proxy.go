@@ -29,9 +29,9 @@ import (
 	"path/filepath"
 	"time"
 
-	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
-	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/soheilhy/cmux"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -503,22 +503,21 @@ func newGRPCProxyServer(lg *zap.Logger, client *clientv3.Client) *grpc.Server {
 	electionp := grpcproxy.NewElectionProxy(client)
 	lockp := grpcproxy.NewLockProxy(client)
 
-	alwaysLoggingDeciderServer := func(ctx context.Context, fullMethodName string, servingObject any) bool { return true }
+	serverMetrics := grpc_prometheus.NewServerMetrics()
+	prometheus.MustRegister(serverMetrics)
 
 	grpcChainStreamList := []grpc.StreamServerInterceptor{
-		grpc_prometheus.StreamServerInterceptor,
+		serverMetrics.StreamServerInterceptor(),
 	}
 	grpcChainUnaryList := []grpc.UnaryServerInterceptor{
-		grpc_prometheus.UnaryServerInterceptor,
+		serverMetrics.UnaryServerInterceptor(),
 	}
 	if grpcProxyEnableLogging {
 		grpcChainStreamList = append(grpcChainStreamList,
-			grpc_ctxtags.StreamServerInterceptor(),
-			grpc_zap.PayloadStreamServerInterceptor(lg, alwaysLoggingDeciderServer),
+			interceptors.StreamServerInterceptor(reportable(lg)),
 		)
 		grpcChainUnaryList = append(grpcChainUnaryList,
-			grpc_ctxtags.UnaryServerInterceptor(),
-			grpc_zap.PayloadUnaryServerInterceptor(lg, alwaysLoggingDeciderServer),
+			interceptors.UnaryServerInterceptor(reportable(lg)),
 		)
 	}
 

@@ -15,13 +15,12 @@
 package auth
 
 import (
-	"context"
-	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -96,19 +95,15 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 		t.Fatal(err)
 	}
 
-	ctx := context.TODO()
+	ctx := t.Context()
 
 	token, aerr := jwt.assign(ctx, "abc", 123)
 	if aerr != nil {
 		t.Fatalf("%#v", aerr)
 	}
 	ai, ok := jwt.info(ctx, token, 123)
-	if !ok {
-		t.Fatalf("failed to authenticate with token %s", token)
-	}
-	if ai.Revision != 123 {
-		t.Fatalf("expected revision 123, got %d", ai.Revision)
-	}
+	require.Truef(t, ok, "failed to authenticate with token %s", token)
+	require.Equalf(t, uint64(123), ai.Revision, "expected revision 123, got %d", ai.Revision)
 	ai, ok = jwt.info(ctx, "aaa", 120)
 	if ok || ai != nil {
 		t.Fatalf("expected aaa to fail to authenticate, got %+v", ai)
@@ -118,9 +113,7 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 	if opts["pub-key"] != "" && opts["priv-key"] != "" {
 		t.Run("verify-only", func(t *testing.T) {
 			newOpts := make(map[string]string, len(opts))
-			for k, v := range opts {
-				newOpts[k] = v
-			}
+			maps.Copy(newOpts, opts)
 			delete(newOpts, "priv-key")
 			verify, err := newTokenProviderJWT(lg, newOpts)
 			if err != nil {
@@ -128,21 +121,15 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 			}
 
 			ai, ok := verify.info(ctx, token, 123)
-			if !ok {
-				t.Fatalf("failed to authenticate with token %s", token)
-			}
-			if ai.Revision != 123 {
-				t.Fatalf("expected revision 123, got %d", ai.Revision)
-			}
+			require.Truef(t, ok, "failed to authenticate with token %s", token)
+			require.Equalf(t, uint64(123), ai.Revision, "expected revision 123, got %d", ai.Revision)
 			ai, ok = verify.info(ctx, "aaa", 120)
 			if ok || ai != nil {
 				t.Fatalf("expected aaa to fail to authenticate, got %+v", ai)
 			}
 
 			_, aerr := verify.assign(ctx, "abc", 123)
-			if !errors.Is(aerr, ErrVerifyOnly) {
-				t.Fatalf("unexpected error when attempting to sign with public key: %v", aerr)
-			}
+			require.ErrorIsf(t, aerr, ErrVerifyOnly, "unexpected error when attempting to sign with public key: %v", aerr)
 		})
 	}
 }
@@ -208,7 +195,7 @@ func TestJWTTokenWithMissingFields(t *testing.T) {
 			// verify the token
 			jwtProvider, err := newTokenProviderJWT(zap.NewNop(), optsMap)
 			require.NoError(t, err)
-			ai, ok := jwtProvider.info(context.TODO(), token, 123)
+			ai, ok := jwtProvider.info(t.Context(), token, 123)
 
 			require.Equal(t, tc.expectValid, ok)
 			if ok {

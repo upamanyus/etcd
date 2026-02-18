@@ -15,24 +15,24 @@
 package recipes_test
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	recipe "go.etcd.io/etcd/client/v3/experimental/recipes"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestDoubleBarrier(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	waiters := 10
@@ -72,9 +72,7 @@ func TestDoubleBarrier(t *testing.T) {
 	default:
 	}
 
-	if err := b.Enter(); err != nil {
-		t.Fatalf("could not enter last barrier (%v)", err)
-	}
+	require.NoErrorf(t, b.Enter(), "could not enter last barrier")
 
 	timerC := time.After(time.Duration(waiters*100) * time.Millisecond)
 	for i := 0; i < waiters-1; i++ {
@@ -104,9 +102,9 @@ func TestDoubleBarrier(t *testing.T) {
 }
 
 func TestDoubleBarrierTooManyClients(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	waiters := 10
@@ -154,7 +152,7 @@ func TestDoubleBarrierTooManyClients(t *testing.T) {
 		t.Errorf("Unexcepted error, expected: ErrTooManyClients, got: %v", err)
 	}
 
-	resp, err := clus.RandClient().Get(context.TODO(), "test-barrier/waiters", clientv3.WithPrefix())
+	resp, err := clus.RandClient().Get(t.Context(), "test-barrier/waiters", clientv3.WithPrefix())
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -166,9 +164,9 @@ func TestDoubleBarrierTooManyClients(t *testing.T) {
 }
 
 func TestDoubleBarrierFailover(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	waiters := 10
@@ -216,9 +214,7 @@ func TestDoubleBarrierFailover(t *testing.T) {
 		}
 	}
 
-	if err = s0.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, s0.Close())
 	// join on rest of waiters
 	for i := 0; i < waiters-1; i++ {
 		select {

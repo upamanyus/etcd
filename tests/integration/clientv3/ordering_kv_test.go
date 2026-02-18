@@ -15,7 +15,6 @@
 package clientv3test
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -25,14 +24,14 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/ordering"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestDetectKvOrderViolation(t *testing.T) {
 	errOrderViolation := errors.New("DetectedOrderViolation")
 
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
@@ -42,28 +41,22 @@ func TestDetectKvOrderViolation(t *testing.T) {
 			clus.Members[2].GRPCURL,
 		},
 	}
-	cli, err := integration2.NewClient(t, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli, err := integration.NewClient(t, cfg)
+	require.NoError(t, err)
 	defer func() { assert.NoError(t, cli.Close()) }()
-	ctx := context.TODO()
+	ctx := t.Context()
 
-	if _, err = clus.Client(0).Put(ctx, "foo", "bar"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = clus.Client(0).Put(ctx, "foo", "bar")
+	require.NoError(t, err)
 	// ensure that the second member has the current revision for the key foo
-	if _, err = clus.Client(1).Get(ctx, "foo"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = clus.Client(1).Get(ctx, "foo")
+	require.NoError(t, err)
 
 	// stop third member in order to force the member to have an outdated revision
 	clus.Members[2].Stop(t)
 	time.Sleep(1 * time.Second) // give enough time for operation
 	_, err = cli.Put(ctx, "foo", "buzz")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// perform get request against the first member, in order to
 	// set up kvOrdering to expect "foo" revisions greater than that of
@@ -73,9 +66,7 @@ func TestDetectKvOrderViolation(t *testing.T) {
 			return errOrderViolation
 		})
 	v, err := orderingKv.Get(ctx, "foo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	t.Logf("Read from the first member: v:%v err:%v", v, err)
 	assert.Equal(t, []byte("buzz"), v.Kvs[0].Value)
 
@@ -98,8 +89,8 @@ func TestDetectKvOrderViolation(t *testing.T) {
 func TestDetectTxnOrderViolation(t *testing.T) {
 	errOrderViolation := errors.New("DetectedOrderViolation")
 
-	integration2.BeforeTest(t)
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
@@ -109,27 +100,22 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 			clus.Members[2].GRPCURL,
 		},
 	}
-	cli, err := integration2.NewClient(t, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli, err := integration.NewClient(t, cfg)
+	require.NoError(t, err)
 	defer func() { assert.NoError(t, cli.Close()) }()
-	ctx := context.TODO()
+	ctx := t.Context()
 
-	if _, err = clus.Client(0).Put(ctx, "foo", "bar"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = clus.Client(0).Put(ctx, "foo", "bar")
+	require.NoError(t, err)
 	// ensure that the second member has the current revision for the key foo
-	if _, err = clus.Client(1).Get(ctx, "foo"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = clus.Client(1).Get(ctx, "foo")
+	require.NoError(t, err)
 
 	// stop third member in order to force the member to have an outdated revision
 	clus.Members[2].Stop(t)
 	time.Sleep(1 * time.Second) // give enough time for operation
-	if _, err = clus.Client(1).Put(ctx, "foo", "buzz"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = clus.Client(1).Put(ctx, "foo", "buzz")
+	require.NoError(t, err)
 
 	// perform get request against the first member, in order to
 	// set up kvOrdering to expect "foo" revisions greater than that of
@@ -144,9 +130,7 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 	).Then(
 		clientv3.OpGet("foo"),
 	).Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// ensure that only the third member is queried during requests
 	clus.Members[0].Stop(t)

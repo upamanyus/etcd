@@ -1,5 +1,4 @@
 // Copyright 2015 The etcd Authors
-// Copyright 2015 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -58,7 +57,7 @@ Member:
   --wal-dir ''
     Path to the dedicated wal directory.
   --snapshot-count '10000'
-    Number of committed transactions to trigger a snapshot to disk. Deprecated in v3.6 and will be decommissioned in v3.7.
+    Number of committed transactions to trigger a snapshot.
   --heartbeat-interval '100'
     Time (in milliseconds) of a heartbeat interval.
   --election-timeout '1000'
@@ -72,11 +71,13 @@ Member:
   --listen-client-http-urls ''
     List of URLs to listen on for http only client traffic. Enabling this flag removes http services from --listen-client-urls.
   --max-snapshots '` + strconv.Itoa(embed.DefaultMaxSnapshots) + `'
-    Maximum number of snapshot files to retain (0 is unlimited). Deprecated in v3.6 and will be decommissioned in v3.7.
+    Maximum number of snapshot files to retain (0 is unlimited). Deprecated in v3.6 and will be decommissioned in v3.8.
   --max-wals '` + strconv.Itoa(embed.DefaultMaxWALs) + `'
     Maximum number of wal files to retain (0 is unlimited).
+  --memory-mlock
+    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
   --quota-backend-bytes '0'
-    Raise alarms when backend size exceeds the given quota (0 defaults to low space quota).
+    Sets the maximum size (in bytes) that the etcd backend database may consume. Exceeding this triggers an alarm and puts etcd in read-only mode. Set to 0 to use the default 2GiB limit.
   --backend-bbolt-freelist-type 'map'
     BackendFreelistType specifies the type of freelist that boltdb backend uses(array and map are supported types).
   --backend-batch-interval ''
@@ -111,8 +112,6 @@ Member:
 Clustering:
   --initial-advertise-peer-urls 'http://localhost:2380'
     List of this member's peer URLs to advertise to the rest of the cluster.
-  --experimental-set-member-localaddr 'false'
-    Enable using the first specified and non-loopback local address from initial-advertise-peer-urls as the local address when communicating with a peer.
   --initial-cluster 'default=http://localhost:2380'
     Initial cluster configuration for bootstrapping.
   --initial-cluster-state 'new'
@@ -260,61 +259,41 @@ Logging:
   --warning-unary-request-duration '300ms'
     Set time duration after which a warning is logged if a unary request takes more than this duration.
 
-Experimental distributed tracing:
-  --experimental-enable-distributed-tracing 'false'
-    Enable experimental distributed tracing.
-  --experimental-distributed-tracing-address 'localhost:4317'
+Distributed tracing:
+  --enable-distributed-tracing 'false'
+    Enable distributed tracing.
+  --distributed-tracing-address 'localhost:4317'
     Distributed tracing collector address.
-  --experimental-distributed-tracing-service-name 'etcd'
+  --distributed-tracing-service-name 'etcd'
     Distributed tracing service name, must be same across all etcd instances.
-  --experimental-distributed-tracing-instance-id ''
+  --distributed-tracing-instance-id ''
     Distributed tracing instance ID, must be unique per each etcd instance.
-  --experimental-distributed-tracing-sampling-rate '0'
-    Number of samples to collect per million spans for distributed tracing. Disabled by default.
+  --distributed-tracing-sampling-rate '0'
+    Number of samples to collect per million spans for distributed tracing.
 
-Experimental feature:
-  --experimental-initial-corrupt-check 'false'. It's deprecated, and will be decommissioned in v3.7. Use '--feature-gates=InitialCorruptCheck=true' instead.
-    Enable to check data corruption before serving any client/peer traffic.
-  --experimental-corrupt-check-time '0s'
+Features:
+  --corrupt-check-time '0s'
     Duration of time between cluster corruption check passes.
-  --experimental-compact-hash-check-enabled 'false'. Deprecated in v3.6 and will be decommissioned in v3.7. Use '--feature-gates=CompactHashCheck=true' instead.
-    Enable leader to periodically check followers compaction hashes.
-  --experimental-compact-hash-check-time '1m'
-    Duration of time between leader checks followers compaction hashes. Deprecated in v3.6 and will be decommissioned in v3.7. Use '--compact-hash-check-time' instead.
   --compact-hash-check-time '1m'
     Duration of time between leader checks followers compaction hashes.
-  --experimental-enable-lease-checkpoint 'false'
-    ExperimentalEnableLeaseCheckpoint enables primary lessor to persist lease remainingTTL to prevent indefinite auto-renewal of long lived leases.
-  --experimental-compaction-batch-limit 1000
-    ExperimentalCompactionBatchLimit sets the maximum revisions deleted in each compaction batch.
-  --experimental-peer-skip-client-san-verification 'false'
+  --compaction-batch-limit 1000
+    CompactionBatchLimit sets the maximum revisions deleted in each compaction batch.
+  --peer-skip-client-san-verification 'false'
     Skip verification of SAN field in client certificate for peer connections.
-  --experimental-watch-progress-notify-interval '10m'
+  --watch-progress-notify-interval '10m'
     Duration of periodical watch progress notification.
-  --experimental-warning-apply-duration '100ms'
+  --warning-apply-duration '100ms'
     Warning is generated if requests take more than this duration.
-  --experimental-txn-mode-write-with-shared-buffer 'true'
-    Enable the write transaction to use a shared buffer in its readonly check operations.
-  --experimental-bootstrap-defrag-threshold-megabytes
+  --bootstrap-defrag-threshold-megabytes
     Enable the defrag during etcd server bootstrap on condition that it will free at least the provided threshold of disk space. Needs to be set to non-zero value to take effect.
-  --experimental-warning-unary-request-duration '300ms'
-    Set time duration after which a warning is generated if a unary request takes more than this duration. It's deprecated, and will be decommissioned in v3.7. Use --warning-unary-request-duration instead.
-  --experimental-max-learners '1'
+  --max-learners '1'
     Set the max number of learner members allowed in the cluster membership.
-  --experimental-snapshot-catch-up-entries '5000'
-    Number of entries for a slow follower to catch up after compacting the raft storage entries.
-  --experimental-compaction-sleep-interval
+  --compaction-sleep-interval
     Sets the sleep interval between each compaction batch.
-  --experimental-downgrade-check-time
+  --downgrade-check-time
     Duration of time between two downgrade status checks.
-  --experimental-enable-lease-checkpoint-persist 'false'
-    Enable persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled. Requires experimental-enable-lease-checkpoint to be enabled.
-  --experimental-memory-mlock
-    Enable to enforce etcd pages (in particular bbolt) to stay in RAM.
-  --experimental-snapshot-catchup-entries
+  --snapshot-catchup-entries
     Number of entries for a slow follower to catch up after compacting the raft storage entries.
-  --experimental-stop-grpc-service-on-defrag
-    Enable etcd gRPC service to stop serving client requests on defragmentation. It's deprecated, and will be decommissioned in v3.7. Use '--feature-gates=StopGRPCServiceOnDefrag=true' instead.
 
 Unsafe feature:
   --force-new-cluster 'false'

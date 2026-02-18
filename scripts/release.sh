@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -o errexit
 set -o nounset
@@ -184,7 +197,7 @@ main() {
     fi
 
     # Tag release.
-    if [ "$(git tag --list | grep -c "${RELEASE_VERSION}")" -gt 0 ]; then
+    if git tag --list | grep --quiet "^${RELEASE_VERSION}$"; then
       log_callout "Skipping tag step. git tag ${RELEASE_VERSION} already exists."
     else
       log_callout "Tagging release..."
@@ -254,7 +267,7 @@ main() {
 
   # Upload artifacts.
   if [ "${DRY_RUN}" == "true" ] || [ "${NO_UPLOAD}" == 1 ]; then
-    log_callout "Skipping artifact upload to gs://etcd. --no-upload flat is set."
+    log_callout "Skipping artifact upload to gs://etcd. --no-upload flag is set."
   else
     read -p "Upload etcd ${RELEASE_VERSION} release artifacts to gs://etcd [y/N]? " -r confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
@@ -266,7 +279,7 @@ main() {
 
   # Push images.
   if [ "${DRY_RUN}" == "true" ] || [ "${NO_DOCKER_PUSH}" == 1 ]; then
-    log_callout "Skipping docker push. --no-docker-push flat is set."
+    log_callout "Skipping docker push. --no-docker-push flag is set."
   else
     read -p "Publish etcd ${RELEASE_VERSION} docker images to quay.io [y/N]? " -r confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
@@ -364,7 +377,8 @@ main() {
     release_notes_temp_file=$(mktemp)
 
     local release_version=${RELEASE_VERSION#v} # Remove the v prefix from the release version (i.e., v3.6.1 -> 3.6.1)
-    local release_version_major_minor=${release_version%.*} # Remove the patch from the version (i.e., 3.6)
+    local release_version_major_minor
+    release_version_major_minor=$(echo "${release_version}" | cut -d. -f1-2) # Remove the patch from the version (i.e., 3.6)
     local release_version_major=${release_version_major_minor%.*} # Extract the major (i.e., 3)
     local release_version_minor=${release_version_major_minor/*./} # Extract the minor (i.e., 6)
 

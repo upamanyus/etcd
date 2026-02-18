@@ -18,6 +18,7 @@ package featuregate
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,8 +112,6 @@ type MutableFeatureGate interface {
 	Add(features map[Feature]FeatureSpec) error
 	// GetAll returns a copy of the map of known feature names to feature specs.
 	GetAll() map[Feature]FeatureSpec
-	// AddMetrics adds feature enablement metrics
-	AddMetrics()
 	// OverrideDefault sets a local override for the registered default value of a named
 	// feature. If the feature has not been previously registered (e.g. by a call to Add), has a
 	// locked default, or if the gate has already registered itself with a FlagSet, a non-nil
@@ -167,14 +166,11 @@ func setUnsetBetaGates(known map[Feature]FeatureSpec, enabled map[Feature]bool, 
 // Set, String, and Type implement pflag.Value
 var _ pflag.Value = &featureGate{}
 
-func New(name string, lg *zap.Logger) *featureGate {
+func New(name string, lg *zap.Logger) MutableFeatureGate {
 	if lg == nil {
 		lg = zap.NewNop()
 	}
-	known := map[Feature]FeatureSpec{}
-	for k, v := range defaultFeatures {
-		known[k] = v
-	}
+	known := maps.Clone(defaultFeatures)
 
 	f := &featureGate{
 		lg:              lg,
@@ -217,13 +213,9 @@ func (f *featureGate) SetFromMap(m map[string]bool) error {
 
 	// Copy existing state
 	known := map[Feature]FeatureSpec{}
-	for k, v := range f.known.Load().(map[Feature]FeatureSpec) {
-		known[k] = v
-	}
+	maps.Copy(known, f.known.Load().(map[Feature]FeatureSpec))
 	enabled := map[Feature]bool{}
-	for k, v := range f.enabled.Load().(map[Feature]bool) {
-		enabled[k] = v
-	}
+	maps.Copy(enabled, f.enabled.Load().(map[Feature]bool))
 
 	for k, v := range m {
 		k := Feature(k)
@@ -280,9 +272,7 @@ func (f *featureGate) Add(features map[Feature]FeatureSpec) error {
 
 	// Copy existing state
 	known := map[Feature]FeatureSpec{}
-	for k, v := range f.known.Load().(map[Feature]FeatureSpec) {
-		known[k] = v
-	}
+	maps.Copy(known, f.known.Load().(map[Feature]FeatureSpec))
 
 	for name, spec := range features {
 		if existingSpec, found := known[name]; found {
@@ -336,9 +326,7 @@ func (f *featureGate) OverrideDefault(name Feature, override bool) error {
 // GetAll returns a copy of the map of known feature names to feature specs.
 func (f *featureGate) GetAll() map[Feature]FeatureSpec {
 	retval := map[Feature]FeatureSpec{}
-	for k, v := range f.known.Load().(map[Feature]FeatureSpec) {
-		retval[k] = v
-	}
+	maps.Copy(retval, f.known.Load().(map[Feature]FeatureSpec))
 	return retval
 }
 
@@ -373,10 +361,6 @@ func (f *featureGate) AddFlag(fs *flag.FlagSet, flagName string) {
 		"Options are:\n"+strings.Join(known, "\n"))
 }
 
-func (f *featureGate) AddMetrics() {
-	// TODO(henrybear327): implement this.
-}
-
 // KnownFeatures returns a slice of strings describing the FeatureGate's known features.
 // Deprecated and GA features are hidden from the list.
 func (f *featureGate) KnownFeatures() []string {
@@ -397,13 +381,9 @@ func (f *featureGate) KnownFeatures() []string {
 func (f *featureGate) DeepCopy() MutableFeatureGate {
 	// Copy existing state.
 	known := map[Feature]FeatureSpec{}
-	for k, v := range f.known.Load().(map[Feature]FeatureSpec) {
-		known[k] = v
-	}
+	maps.Copy(known, f.known.Load().(map[Feature]FeatureSpec))
 	enabled := map[Feature]bool{}
-	for k, v := range f.enabled.Load().(map[Feature]bool) {
-		enabled[k] = v
-	}
+	maps.Copy(enabled, f.enabled.Load().(map[Feature]bool))
 
 	// Construct a new featureGate around the copied state.
 	// Note that specialFeatures is treated as immutable by convention,

@@ -132,7 +132,7 @@ func TestStoreUpdateDirTTL(t *testing.T) {
 	assert.False(t, e.Node.Dir)
 	assert.Equal(t, eidx, e.EtcdIndex)
 	e, _ = s.Get("/foo/bar", false, false)
-	assert.Equal(t, "", *e.Node.Value)
+	assert.Empty(t, *e.Node.Value)
 	assert.Equal(t, eidx, e.EtcdIndex)
 
 	fc.Advance(600 * time.Millisecond)
@@ -350,7 +350,7 @@ func TestStoreWatchExpireWithHiddenKey(t *testing.T) {
 }
 
 // newFakeClock creates a new FakeClock that has been advanced to at least minExpireTime
-func newFakeClock() clockwork.FakeClock {
+func newFakeClock() *clockwork.FakeClock {
 	fc := clockwork.NewFakeClock()
 	for minExpireTime.After(fc.Now()) {
 		fc.Advance((0x1 << 62) * time.Nanosecond)

@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	gw "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/soheilhy/cmux"
@@ -60,12 +61,35 @@ type serveCtx struct {
 	insecure bool
 	httpOnly bool
 
+	// ctx is used to control the grpc gateway. Terminate the grpc gateway
+	// by calling `cancel` when shutting down the etcd.
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	userHandlers    map[string]http.Handler
 	serviceRegister func(*grpc.Server)
-	serversC        chan *servers
+
+	// serversC is used to receive the http and grpc server objects (created
+	// in `serve`), both of which will be closed when shutting down the etcd.
+	// Close it when `serve` returns or when etcd fails to bootstrap.
+	serversC chan *servers
+	// closeOnce is to ensure `serversC` is closed only once.
+	closeOnce sync.Once
+
+	// wg is used to track the lifecycle of all sub goroutines created by `serve`.
+	wg sync.WaitGroup
+}
+
+func (sctx *serveCtx) startHandler(errHandler func(error), handler func() error) {
+	// start each handler in a separate goroutine
+	sctx.wg.Add(1)
+	go func() {
+		defer sctx.wg.Done()
+		err := handler()
+		if errHandler != nil {
+			errHandler(err)
+		}
+	}()
 }
 
 type servers struct {
@@ -102,6 +126,9 @@ func (sctx *serveCtx) serve(
 ) (err error) {
 	logger := defaultLog.New(io.Discard, "etcdhttp", 0)
 
+	// Make sure serversC is closed even if we prematurely exit the function.
+	defer sctx.close()
+
 	select {
 	case <-s.StoppingNotify():
 		return errors.New("server is stopping")
@@ -121,8 +148,6 @@ func (sctx *serveCtx) serve(
 	servElection := v3election.NewElectionServer(v3c)
 	servLock := v3lock.NewLockServer(v3c)
 
-	// Make sure serversC is closed even if we prematurely exit the function.
-	defer close(sctx.serversC)
 	var gwmux *gw.ServeMux
 	if s.Cfg.EnableGRPCGateway {
 		// GRPC gateway connects to grpc server via connection provided by grpc dial.
@@ -179,15 +204,15 @@ func (sctx *serveCtx) serve(
 			server = m.Serve
 
 			httpl := m.Match(cmux.HTTP1())
-			go func(srvhttp *http.Server, tlsLis net.Listener) {
-				errHandler(srvhttp.Serve(tlsLis))
-			}(srv, httpl)
+			sctx.startHandler(errHandler, func() error {
+				return srv.Serve(httpl)
+			})
 
 			if grpcEnabled {
 				grpcl := m.Match(cmux.HTTP2())
-				go func(gs *grpc.Server, l net.Listener) {
-					errHandler(gs.Serve(l))
-				}(gs, grpcl)
+				sctx.startHandler(errHandler, func() error {
+					return gs.Serve(grpcl)
+				})
 			}
 		}
 
@@ -234,7 +259,7 @@ func (sctx *serveCtx) serve(
 				TLSConfig: tlscfg,
 				ErrorLog:  logger, // do not log user error
 			}
-			if err := configureHTTPServer(srv, s.Cfg); err != nil {
+			if err = configureHTTPServer(srv, s.Cfg); err != nil {
 				sctx.lg.Error("Configure https server failed", zap.Error(err))
 				return err
 			}
@@ -245,13 +270,13 @@ func (sctx *serveCtx) serve(
 		} else {
 			server = m.Serve
 
-			tlsl, err := transport.NewTLSListener(m.Match(cmux.Any()), tlsinfo)
-			if err != nil {
-				return err
+			tlsl, tlsErr := transport.NewTLSListener(m.Match(cmux.Any()), tlsinfo)
+			if tlsErr != nil {
+				return tlsErr
 			}
-			go func(srvhttp *http.Server, tlsl net.Listener) {
-				errHandler(srvhttp.Serve(tlsl))
-			}(srv, tlsl)
+			sctx.startHandler(errHandler, func() error {
+				return srv.Serve(tlsl)
+			})
 		}
 
 		sctx.serversC <- &servers{secure: true, grpc: gs, http: srv}
@@ -262,7 +287,10 @@ func (sctx *serveCtx) serve(
 		)
 	}
 
-	return server()
+	err = server()
+	sctx.close()
+	sctx.wg.Wait()
+	return err
 }
 
 func configureHTTPServer(srv *http.Server, cfg config.ServerConfig) error {
@@ -331,7 +359,7 @@ func (sctx *serveCtx) registerGateway(dial func(ctx context.Context) (*grpc.Clie
 			return nil, err
 		}
 	}
-	go func() {
+	sctx.startHandler(nil, func() error {
 		<-ctx.Done()
 		if cerr := conn.Close(); cerr != nil {
 			sctx.lg.Warn(
@@ -340,7 +368,8 @@ func (sctx *serveCtx) registerGateway(dial func(ctx context.Context) (*grpc.Clie
 				zap.Error(cerr),
 			)
 		}
-	}()
+		return nil
+	})
 
 	return gwmux, nil
 }
@@ -520,4 +549,10 @@ func (sctx *serveCtx) registerTrace() {
 	sctx.registerUserHandler("/debug/requests", http.HandlerFunc(reqf))
 	evf := func(w http.ResponseWriter, r *http.Request) { trace.RenderEvents(w, r, true) }
 	sctx.registerUserHandler("/debug/events", http.HandlerFunc(evf))
+}
+
+func (sctx *serveCtx) close() {
+	sctx.closeOnce.Do(func() {
+		close(sctx.serversC)
+	})
 }

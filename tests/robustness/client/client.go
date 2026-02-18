@@ -16,6 +16,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -29,12 +30,12 @@ import (
 	"go.etcd.io/etcd/tests/v3/robustness/report"
 )
 
-// RecordingClient provides a semi etcd client (different interface than
+// RecordingClient provides a semi-etcd client (different interface than
 // clientv3.Client) that records all the requests and responses made. Doesn't
-// allow for concurrent requests to confirm to model.AppendableHistory requirements.
+// allow for concurrent requests to conform to model.AppendableHistory requirements.
 type RecordingClient struct {
 	ID     int
-	client clientv3.Client
+	client *clientv3.Client
 	// using baseTime time-measuring operation to get monotonic clock reading
 	// see https://github.com/golang/go/blob/master/src/time/time.go#L17
 	baseTime time.Time
@@ -45,6 +46,8 @@ type RecordingClient struct {
 	kvMux        sync.Mutex
 	kvOperations *model.AppendableHistory
 }
+
+var _ clientv3.KV = (*RecordingClient)(nil)
 
 type TimedWatchEvent struct {
 	model.WatchEvent
@@ -63,7 +66,7 @@ func NewRecordingClient(endpoints []string, ids identity.Provider, baseTime time
 	}
 	return &RecordingClient{
 		ID:           ids.NewClientID(),
-		client:       *cc,
+		client:       cc,
 		kvOperations: model.NewAppendableHistory(ids),
 		baseTime:     baseTime,
 	}, nil
@@ -81,15 +84,13 @@ func (c *RecordingClient) Report() report.ClientReport {
 	}
 }
 
-func (c *RecordingClient) Get(ctx context.Context, key string, revision int64) (kv *mvccpb.KeyValue, rev int64, err error) {
-	resp, err := c.Range(ctx, key, "", revision, 0)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(resp.Kvs) == 1 {
-		kv = resp.Kvs[0]
-	}
-	return kv, resp.Header.Revision, nil
+func (c *RecordingClient) Do(ctx context.Context, op clientv3.Op) (clientv3.OpResponse, error) {
+	panic("not implemented")
+}
+
+func (c *RecordingClient) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+	op := clientv3.OpGet(key, opts...)
+	return c.Range(ctx, key, string(op.RangeBytes()), op.Rev(), op.Limit())
 }
 
 func (c *RecordingClient) Range(ctx context.Context, start, end string, revision, limit int64) (*clientv3.GetResponse, error) {
@@ -112,7 +113,7 @@ func (c *RecordingClient) Range(ctx context.Context, start, end string, revision
 	return resp, err
 }
 
-func (c *RecordingClient) Put(ctx context.Context, key, value string) (*clientv3.PutResponse, error) {
+func (c *RecordingClient) Put(ctx context.Context, key, value string, _ ...clientv3.OpOption) (*clientv3.PutResponse, error) {
 	c.kvMux.Lock()
 	defer c.kvMux.Unlock()
 	callTime := time.Since(c.baseTime)
@@ -122,7 +123,7 @@ func (c *RecordingClient) Put(ctx context.Context, key, value string) (*clientv3
 	return resp, err
 }
 
-func (c *RecordingClient) Delete(ctx context.Context, key string) (*clientv3.DeleteResponse, error) {
+func (c *RecordingClient) Delete(ctx context.Context, key string, _ ...clientv3.OpOption) (*clientv3.DeleteResponse, error) {
 	c.kvMux.Lock()
 	defer c.kvMux.Unlock()
 	callTime := time.Since(c.baseTime)
@@ -132,21 +133,46 @@ func (c *RecordingClient) Delete(ctx context.Context, key string) (*clientv3.Del
 	return resp, err
 }
 
-func (c *RecordingClient) Txn(ctx context.Context, conditions []clientv3.Cmp, onSuccess []clientv3.Op, onFailure []clientv3.Op) (*clientv3.TxnResponse, error) {
-	txn := c.client.Txn(ctx).If(
-		conditions...,
-	).Then(
-		onSuccess...,
-	).Else(
-		onFailure...,
-	)
-	c.kvMux.Lock()
-	defer c.kvMux.Unlock()
-	callTime := time.Since(c.baseTime)
-	resp, err := txn.Commit()
-	returnTime := time.Since(c.baseTime)
-	c.kvOperations.AppendTxn(conditions, onSuccess, onFailure, callTime, returnTime, resp, err)
+type wrappedTxn struct {
+	txn        clientv3.Txn
+	conditions []clientv3.Cmp
+	onSuccess  []clientv3.Op
+	onFailure  []clientv3.Op
+	c          *RecordingClient
+}
+
+var _ clientv3.Txn = (*wrappedTxn)(nil)
+
+func (w *wrappedTxn) If(cs ...clientv3.Cmp) clientv3.Txn {
+	w.conditions = append(w.conditions, cs...)
+	w.txn = w.txn.If(cs...)
+	return w
+}
+
+func (w *wrappedTxn) Then(ops ...clientv3.Op) clientv3.Txn {
+	w.onSuccess = append(w.onSuccess, ops...)
+	w.txn = w.txn.Then(ops...)
+	return w
+}
+
+func (w *wrappedTxn) Else(ops ...clientv3.Op) clientv3.Txn {
+	w.onFailure = append(w.onFailure, ops...)
+	w.txn = w.txn.Else(ops...)
+	return w
+}
+
+func (w *wrappedTxn) Commit() (*clientv3.TxnResponse, error) {
+	w.c.kvMux.Lock()
+	defer w.c.kvMux.Unlock()
+	callTime := time.Since(w.c.baseTime)
+	resp, err := w.txn.Commit()
+	returnTime := time.Since(w.c.baseTime)
+	w.c.kvOperations.AppendTxn(w.conditions, w.onSuccess, w.onFailure, callTime, returnTime, resp, err)
 	return resp, err
+}
+
+func (c *RecordingClient) Txn(ctx context.Context) clientv3.Txn {
+	return &wrappedTxn{txn: c.client.Txn(ctx), c: c}
 }
 
 func (c *RecordingClient) LeaseGrant(ctx context.Context, ttl int64) (*clientv3.LeaseGrantResponse, error) {
@@ -190,7 +216,7 @@ func (c *RecordingClient) Defragment(ctx context.Context) (*clientv3.DefragmentR
 	return resp, err
 }
 
-func (c *RecordingClient) Compact(ctx context.Context, rev int64) (*clientv3.CompactResponse, error) {
+func (c *RecordingClient) Compact(ctx context.Context, rev int64, _ ...clientv3.CompactOption) (*clientv3.CompactResponse, error) {
 	c.kvMux.Lock()
 	defer c.kvMux.Unlock()
 	callTime := time.Since(c.baseTime)
@@ -280,10 +306,11 @@ func (c *RecordingClient) watch(ctx context.Context, request model.WatchRequest)
 	}
 	respCh := make(chan clientv3.WatchResponse)
 
+	responses := []model.WatchResponse{}
 	c.watchMux.Lock()
 	c.watchOperations = append(c.watchOperations, model.WatchOperation{
 		Request:   request,
-		Responses: []model.WatchResponse{},
+		Responses: responses,
 	})
 	index := len(c.watchOperations) - 1
 	c.watchMux.Unlock()
@@ -291,7 +318,10 @@ func (c *RecordingClient) watch(ctx context.Context, request model.WatchRequest)
 	go func() {
 		defer close(respCh)
 		for r := range c.client.Watch(ctx, request.Key, ops...) {
-			c.watchOperations[index].Responses = append(c.watchOperations[index].Responses, ToWatchResponse(r, c.baseTime))
+			responses = append(responses, ToWatchResponse(r, c.baseTime))
+			c.watchMux.Lock()
+			c.watchOperations[index].Responses = responses
+			c.watchMux.Unlock()
 			select {
 			case respCh <- r:
 			case <-ctx.Done():
@@ -331,17 +361,96 @@ func toWatchEvent(event clientv3.Event) (watch model.WatchEvent) {
 		watch.PrevValue = &model.ValueRevision{
 			Value:       model.ToValueOrHash(string(event.PrevKv.Value)),
 			ModRevision: event.PrevKv.ModRevision,
+			Version:     event.PrevKv.Version,
 		}
 	}
 	watch.IsCreate = event.IsCreate()
 
 	switch event.Type {
-	case mvccpb.PUT:
+	case mvccpb.Event_PUT:
 		watch.Type = model.PutOperation
-	case mvccpb.DELETE:
+	case mvccpb.Event_DELETE:
 		watch.Type = model.DeleteOperation
 	default:
 		panic(fmt.Sprintf("Unexpected event type: %s", event.Type))
 	}
 	return watch
+}
+
+type ClientSet struct {
+	idProvider identity.Provider
+	baseTime   time.Time
+
+	mux     sync.Mutex
+	closed  bool
+	clients []*RecordingClient
+	reports []report.ClientReport
+}
+
+func NewSet(ids identity.Provider, baseTime time.Time) *ClientSet {
+	return &ClientSet{
+		idProvider: ids,
+		baseTime:   baseTime,
+
+		clients: []*RecordingClient{},
+	}
+}
+
+func (cs *ClientSet) NewClient(endpoints []string) (*RecordingClient, error) {
+	cs.mux.Lock()
+	defer cs.mux.Unlock()
+	if cs.closed {
+		return nil, errors.New("the clientset is already closed")
+	}
+	cli, err := NewRecordingClient(endpoints, cs.idProvider, cs.baseTime)
+	if err != nil {
+		return nil, err
+	}
+	cs.clients = append(cs.clients, cli)
+	return cli, nil
+}
+
+func (cs *ClientSet) Reports() []report.ClientReport {
+	cs.mux.Lock()
+	defer cs.mux.Unlock()
+	if !cs.closed {
+		cs.close()
+	}
+	if cs.reports == nil {
+		reports := cs.generateReports()
+		cs.reports = reports
+	}
+	return cs.reports
+}
+
+func (cs *ClientSet) Close() {
+	cs.mux.Lock()
+	defer cs.mux.Unlock()
+	cs.close()
+}
+
+func (cs *ClientSet) close() {
+	if cs.closed {
+		return
+	}
+	for _, c := range cs.clients {
+		c.Close()
+	}
+	cs.closed = true
+}
+
+func (cs *ClientSet) generateReports() []report.ClientReport {
+	reports := make([]report.ClientReport, 0, len(cs.clients))
+	for _, c := range cs.clients {
+		reports = append(reports, c.Report())
+	}
+	return reports
+}
+
+func (cs *ClientSet) IdentityProvider() identity.Provider {
+	return cs.idProvider
+}
+
+func (cs *ClientSet) BaseTime() time.Time {
+	return cs.baseTime
 }

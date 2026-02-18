@@ -58,12 +58,8 @@ var (
 	}
 
 	deprecatedFlags = map[string]string{
-		// TODO: remove in 3.7.
-		"snapshot-count": "--snapshot-count is deprecated in 3.6 and will be decommissioned in 3.7.",
-		"max-snapshots":  "--max-snapshots is deprecated in 3.6 and will be decommissioned in 3.7.",
+		"max-snapshots":  "--max-snapshots is deprecated in 3.6 and will be decommissioned in 3.8.",
 		"v2-deprecation": "--v2-deprecation is deprecated and scheduled for removal in v3.8. The default value is enforced, ignoring user input.",
-		"experimental-compact-hash-check-enabled": "--experimental-compact-hash-check-enabled is deprecated in 3.6 and will be decommissioned in 3.7. Use '--feature-gates=CompactHashCheck=true' instead.",
-		"experimental-compact-hash-check-time":    "--experimental-compact-hash-check-time is deprecated in 3.6 and will be decommissioned in 3.7. Use '--compact-hash-check-time' instead.",
 	}
 )
 
@@ -167,35 +163,28 @@ func (cfg *config) parse(arguments []string) error {
 		err = cfg.configFromCmdLine()
 	}
 
-	// params related to experimental flag deprecation
-	// TODO: delete in v3.7
-	if cfg.ec.FlagsExplicitlySet["experimental-compact-hash-check-time"] {
-		cfg.ec.CompactHashCheckTime = cfg.ec.ExperimentalCompactHashCheckTime
-	}
-
 	// `V2Deprecation` (--v2-deprecation) is deprecated and scheduled for removal in v3.8. The default value is enforced, ignoring user input.
 	cfg.ec.V2Deprecation = cconfig.V2DeprDefault
 
-	cfg.ec.WarningUnaryRequestDuration, perr = cfg.parseWarningUnaryRequestDuration()
-	if perr != nil {
-		return perr
+	cfg.ec.WarningUnaryRequestDuration = cfg.parseWarningUnaryRequestDuration()
+
+	// Check for deprecated options from both command line and config file
+	var warningsForDeprecatedOpts []string
+	for flagName := range cfg.ec.FlagsExplicitlySet {
+		if msg, ok := deprecatedFlags[flagName]; ok {
+			warningsForDeprecatedOpts = append(warningsForDeprecatedOpts, msg)
+		}
 	}
 
-	var warningsForDeprecatedFlags []string
-	cfg.cf.flagSet.Visit(func(f *flag.Flag) {
-		if msg, ok := deprecatedFlags[f.Name]; ok {
-			warningsForDeprecatedFlags = append(warningsForDeprecatedFlags, msg)
-		}
-	})
-	if len(warningsForDeprecatedFlags) > 0 {
+	// Log warnings if any deprecated options were found
+	if len(warningsForDeprecatedOpts) > 0 {
 		if lg := cfg.ec.GetLogger(); lg != nil {
-			for _, msg := range warningsForDeprecatedFlags {
+			for _, msg := range warningsForDeprecatedOpts {
 				lg.Warn(msg)
 			}
 		}
 	}
 
-	// now logger is set up
 	return err
 }
 
@@ -264,28 +253,13 @@ func (cfg *config) configFromCmdLine() error {
 	}
 
 	// disable default initial-cluster if discovery is set
-	if (cfg.ec.Durl != "" || cfg.ec.DNSCluster != "" || cfg.ec.DNSClusterServiceName != "" || len(cfg.ec.DiscoveryCfg.Endpoints) > 0) && !flags.IsSet(cfg.cf.flagSet, "initial-cluster") {
+	if (cfg.ec.DNSCluster != "" || cfg.ec.DNSClusterServiceName != "" || len(cfg.ec.DiscoveryCfg.Endpoints) > 0) && !flags.IsSet(cfg.cf.flagSet, "initial-cluster") {
 		cfg.ec.InitialCluster = ""
 	}
 
 	cfg.cf.flagSet.Visit(func(f *flag.Flag) {
 		cfg.ec.FlagsExplicitlySet[f.Name] = true
 	})
-
-	getBoolFlagVal := func(flagName string) *bool {
-		boolVal, parseErr := flags.GetBoolFlagVal(cfg.cf.flagSet, flagName)
-		if parseErr != nil {
-			panic(parseErr)
-		}
-		return boolVal
-	}
-
-	// SetFeatureGatesFromExperimentalFlags validates that cmd line flags for experimental feature and their feature gates are not explicitly set simultaneously,
-	// and passes the values of cmd line flags for experimental feature to the server feature gate.
-	err = embed.SetFeatureGatesFromExperimentalFlags(cfg.ec.ServerFeatureGate, getBoolFlagVal, cfg.cf.flagSet.Lookup(embed.ServerFeatureGateFlagName).Value.String())
-	if err != nil {
-		return err
-	}
 
 	return cfg.validate()
 }
@@ -307,23 +281,10 @@ func (cfg *config) validate() error {
 	return cfg.ec.Validate()
 }
 
-func (cfg *config) parseWarningUnaryRequestDuration() (time.Duration, error) {
-	if cfg.ec.ExperimentalWarningUnaryRequestDuration != 0 && cfg.ec.WarningUnaryRequestDuration != 0 {
-		return 0, errors.New(
-			"both --experimental-warning-unary-request-duration and --warning-unary-request-duration flags are set. " +
-				"Use only --warning-unary-request-duration")
-	}
-
+func (cfg *config) parseWarningUnaryRequestDuration() time.Duration {
 	if cfg.ec.WarningUnaryRequestDuration != 0 {
-		return cfg.ec.WarningUnaryRequestDuration, nil
+		return cfg.ec.WarningUnaryRequestDuration
 	}
 
-	if cfg.ec.ExperimentalWarningUnaryRequestDuration != 0 {
-		cfg.ec.GetLogger().Warn(
-			"--experimental-warning-unary-request-duration is deprecated, and will be decommissioned in v3.7. " +
-				"Use --warning-unary-request-duration instead.")
-		return cfg.ec.ExperimentalWarningUnaryRequestDuration, nil
-	}
-
-	return embed.DefaultWarningUnaryRequestDuration, nil
+	return embed.DefaultWarningUnaryRequestDuration
 }

@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -268,36 +269,52 @@ func TestIntervalTreeDelete(t *testing.T) {
 	require.Truef(t, reflect.DeepEqual(expectedAfterDelete11, visitsAfterDelete11), "level order after deleting '11' expected %v, got %v", expectedAfterDelete11, visitsAfterDelete11)
 }
 
+func TestIntervalTreeFind(t *testing.T) {
+	ivt := NewIntervalTree()
+	ivl1 := NewInt64Interval(3, 6)
+	val := 123
+	assert.Nilf(t, ivt.Find(ivl1), "find for %v expected nil on empty tree", ivl1)
+	// insert interval [3, 6) into tree
+	ivt.Insert(ivl1, val)
+	// check cases of expected find matches and non-matches
+	assert.NotNilf(t, ivt.Find(ivl1), "find expected not-nil on exact-matched interval %v", ivl1)
+	assert.Equalf(t, ivl1, ivt.Find(ivl1).Ivl, "find expected to return exact-matched interval %v", ivl1)
+	ivl2 := NewInt64Interval(3, 7)
+	assert.Nilf(t, ivt.Find(ivl2), "find expected nil on matched start, different end %v", ivl2)
+	ivl3 := NewInt64Interval(2, 6)
+	assert.Nilf(t, ivt.Find(ivl3), "find expected nil on different start, matched end %v", ivl3)
+	ivl4 := NewInt64Interval(10, 20)
+	assert.Nilf(t, ivt.Find(ivl4), "find expected nil on different start, different end %v", ivl4)
+	// insert the additional intervals into the tree, and check they can each be found.
+	ivls := []Interval{ivl2, ivl3, ivl4}
+	for _, ivl := range ivls {
+		ivt.Insert(ivl, val)
+		assert.NotNilf(t, ivt.Find(ivl), "find expected not-nil on exact-matched interval %v", ivl)
+		assert.Equalf(t, ivl, ivt.Find(ivl).Ivl, "find expected to return exact-matched interval %v", ivl)
+	}
+	// check additional intervals no longer found after deletion
+	for _, ivl := range ivls {
+		assert.Truef(t, ivt.Delete(ivl), "expected successful delete on %v", ivl)
+		assert.Nilf(t, ivt.Find(ivl), "find expected nil after deleted interval %v", ivl)
+	}
+}
+
 func TestIntervalTreeIntersects(t *testing.T) {
 	ivt := NewIntervalTree()
 	ivt.Insert(NewStringInterval("1", "3"), 123)
 
-	if ivt.Intersects(NewStringPoint("0")) {
-		t.Errorf("contains 0")
-	}
-	if !ivt.Intersects(NewStringPoint("1")) {
-		t.Errorf("missing 1")
-	}
-	if !ivt.Intersects(NewStringPoint("11")) {
-		t.Errorf("missing 11")
-	}
-	if !ivt.Intersects(NewStringPoint("2")) {
-		t.Errorf("missing 2")
-	}
-	if ivt.Intersects(NewStringPoint("3")) {
-		t.Errorf("contains 3")
-	}
+	assert.Falsef(t, ivt.Intersects(NewStringPoint("0")), "contains 0")
+	assert.Truef(t, ivt.Intersects(NewStringPoint("1")), "missing 1")
+	assert.Truef(t, ivt.Intersects(NewStringPoint("11")), "missing 11")
+	assert.Truef(t, ivt.Intersects(NewStringPoint("2")), "missing 2")
+	assert.Falsef(t, ivt.Intersects(NewStringPoint("3")), "contains 3")
 }
 
 func TestIntervalTreeStringAffine(t *testing.T) {
 	ivt := NewIntervalTree()
 	ivt.Insert(NewStringAffineInterval("8", ""), 123)
-	if !ivt.Intersects(NewStringAffinePoint("9")) {
-		t.Errorf("missing 9")
-	}
-	if ivt.Intersects(NewStringAffinePoint("7")) {
-		t.Errorf("contains 7")
-	}
+	assert.Truef(t, ivt.Intersects(NewStringAffinePoint("9")), "missing 9")
+	assert.Falsef(t, ivt.Intersects(NewStringAffinePoint("7")), "contains 7")
 }
 
 func TestIntervalTreeStab(t *testing.T) {
@@ -310,27 +327,13 @@ func TestIntervalTreeStab(t *testing.T) {
 
 	tr := ivt.(*intervalTree)
 	require.Equalf(t, 0, tr.root.max.Compare(StringComparable("8")), "wrong root max got %v, expected 8", tr.root.max)
-	if x := len(ivt.Stab(NewStringPoint("0"))); x != 3 {
-		t.Errorf("got %d, expected 3", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("1"))); x != 2 {
-		t.Errorf("got %d, expected 2", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("2"))); x != 1 {
-		t.Errorf("got %d, expected 1", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("3"))); x != 0 {
-		t.Errorf("got %d, expected 0", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("5"))); x != 1 {
-		t.Errorf("got %d, expected 1", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("55"))); x != 1 {
-		t.Errorf("got %d, expected 1", x)
-	}
-	if x := len(ivt.Stab(NewStringPoint("6"))); x != 1 {
-		t.Errorf("got %d, expected 1", x)
-	}
+	assert.Len(t, ivt.Stab(NewStringPoint("0")), 3)
+	assert.Len(t, ivt.Stab(NewStringPoint("1")), 2)
+	assert.Len(t, ivt.Stab(NewStringPoint("2")), 1)
+	assert.Empty(t, ivt.Stab(NewStringPoint("3")))
+	assert.Len(t, ivt.Stab(NewStringPoint("5")), 1)
+	assert.Len(t, ivt.Stab(NewStringPoint("55")), 1)
+	assert.Len(t, ivt.Stab(NewStringPoint("6")), 1)
 }
 
 type xy struct {
@@ -368,15 +371,17 @@ func TestIntervalTreeRandom(t *testing.T) {
 			require.NotEmptyf(t, ivt.Stab(NewInt64Point(v)), "expected %v stab non-zero for [%+v)", v, xy)
 			require.Truef(t, ivt.Intersects(NewInt64Point(v)), "did not get %d as expected for [%+v)", v, xy)
 		}
-		if !ivt.Delete(NewInt64Interval(ab.x, ab.y)) {
-			t.Errorf("did not delete %v as expected", ab)
-		}
+		ivl := NewInt64Interval(ab.x, ab.y)
+		iv := ivt.Find(ivl)
+		assert.NotNilf(t, iv, "expected find non-nil on %v", ab)
+		assert.Equalf(t, ivl, iv.Ivl, "find did not get matched interval %v", ab)
+		assert.Truef(t, ivt.Delete(ivl), "did not delete %v as expected", ab)
 		delete(ivs, ab)
+		ivAfterDel := ivt.Find(ivl)
+		assert.Nilf(t, ivAfterDel, "expected find nil after deletion on %v", ab)
 	}
 
-	if ivt.Len() != 0 {
-		t.Errorf("got ivt.Len() = %v, expected 0", ivt.Len())
-	}
+	assert.Equalf(t, 0, ivt.Len(), "got ivt.Len() = %v, expected 0", ivt.Len())
 }
 
 // TestIntervalTreeSortedVisit tests that intervals are visited in sorted order.
@@ -417,17 +422,13 @@ func TestIntervalTreeSortedVisit(t *testing.T) {
 		last := tt.ivls[0].Begin
 		count := 0
 		chk := func(iv *IntervalValue) bool {
-			if last.Compare(iv.Ivl.Begin) > 0 {
-				t.Errorf("#%d: expected less than %d, got interval %+v", i, last, iv.Ivl)
-			}
+			assert.LessOrEqualf(t, last.Compare(iv.Ivl.Begin), 0, "#%d: expected less than %d, got interval %+v", i, last, iv.Ivl)
 			last = iv.Ivl.Begin
 			count++
 			return true
 		}
 		ivt.Visit(tt.visitRange, chk)
-		if count != len(tt.ivls) {
-			t.Errorf("#%d: did not cover all intervals. expected %d, got %d", i, len(tt.ivls), count)
-		}
+		assert.Lenf(t, tt.ivls, count, "#%d: did not cover all intervals. expected %d, got %d", i, len(tt.ivls), count)
 	}
 }
 
@@ -468,9 +469,7 @@ func TestIntervalTreeVisitExit(t *testing.T) {
 			count++
 			return tt.f(n)
 		})
-		if count != tt.wcount {
-			t.Errorf("#%d: expected count %d, got %d", i, tt.wcount, count)
-		}
+		assert.Equalf(t, count, tt.wcount, "#%d: expected count %d, got %d", i, tt.wcount, count)
 	}
 }
 
@@ -530,8 +529,7 @@ func TestIntervalTreeContains(t *testing.T) {
 		for _, ivl := range tt.ivls {
 			ivt.Insert(ivl, struct{}{})
 		}
-		if v := ivt.Contains(tt.chkIvl); v != tt.wContains {
-			t.Errorf("#%d: ivt.Contains got %v, expected %v", i, v, tt.wContains)
-		}
+		v := ivt.Contains(tt.chkIvl)
+		assert.Equalf(t, v, tt.wContains, "#%d: ivt.Contains got %v, expected %v", i, v, tt.wContains)
 	}
 }

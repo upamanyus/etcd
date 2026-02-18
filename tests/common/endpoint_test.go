@@ -28,22 +28,20 @@ import (
 
 func TestEndpointStatus(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t)
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
 		_, err := cc.Status(ctx)
-		if err != nil {
-			t.Fatalf("get endpoint status error: %v", err)
-		}
+		require.NoErrorf(t, err, "get endpoint status error: %v", err)
 	})
 }
 
 func TestEndpointHashKV(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t)
 	defer clus.Close()
@@ -53,9 +51,8 @@ func TestEndpointHashKV(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("key-%d", i)
 		value := fmt.Sprintf("value-%d", i)
-		if err := cc.Put(ctx, key, value, config.PutOptions{}); err != nil {
-			t.Fatalf("count not put key %q, err: %s", key, err)
-		}
+		_, err := cc.Put(ctx, key, value, config.PutOptions{})
+		require.NoErrorf(t, err, "count not put key %q", key)
 	}
 
 	t.Log("Check all members' Hash and HashRevision")
@@ -76,14 +73,12 @@ func TestEndpointHashKV(t *testing.T) {
 
 func TestEndpointHealth(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	clus := testRunner.NewCluster(ctx, t)
 	defer clus.Close()
 	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
-		if err := cc.Health(ctx); err != nil {
-			t.Fatalf("get endpoint health error: %v", err)
-		}
+		require.NoErrorf(t, cc.Health(ctx), "get endpoint health error")
 	})
 }

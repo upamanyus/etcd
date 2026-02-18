@@ -37,14 +37,12 @@ func TestNewTimeoutTransport(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(remoteAddr))
 
 	defer srv.Close()
-	conn, err := tr.Dial("tcp", srv.Listener.Addr().String())
+	conn, err := tr.Dial("tcp", srv.Listener.Addr().String()) //nolint:staticcheck // TODO: remove for a supported version
 	require.NoError(t, err)
 	defer conn.Close()
 
 	tconn, ok := conn.(*timeoutConn)
-	if !ok {
-		t.Fatalf("failed to dial out *timeoutConn")
-	}
+	require.Truef(t, ok, "failed to dial out *timeoutConn")
 	if tconn.readTimeout != time.Hour {
 		t.Errorf("read timeout = %s, want %s", tconn.readTimeout, time.Hour)
 	}

@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 
@@ -35,6 +37,7 @@ import (
 	apply2 "go.etcd.io/etcd/server/v3/etcdserver/apply"
 	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.etcd.io/etcd/server/v3/etcdserver/txn"
+	"go.etcd.io/etcd/server/v3/features"
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/lease/leasehttp"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
@@ -101,12 +104,21 @@ type Authenticator interface {
 }
 
 func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeResponse, error) {
-	trace := traceutil.New("range",
-		s.Logger(),
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "range", trace.WithAttributes(
+		attribute.String("range_begin", string(r.GetKey())),
+		attribute.String("range_end", string(r.GetRangeEnd())),
+		attribute.Int64("rev", r.GetRevision()),
+		attribute.Int64("limit", r.GetLimit()),
+		attribute.Bool("count_only", r.GetCountOnly()),
+		attribute.Bool("keys_only", r.GetKeysOnly()),
+	))
+	defer span.End()
+
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "range",
 		traceutil.Field{Key: "range_begin", Value: string(r.Key)},
 		traceutil.Field{Key: "range_end", Value: string(r.RangeEnd)},
 	)
-	ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
 
 	var resp *pb.RangeResponse
 	var err error
@@ -119,6 +131,8 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 			)
 		}
 		trace.LogIfLong(traceThreshold)
+		success := err == nil
+		requestDurationSec.WithLabelValues("Range", strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
 	}(time.Now())
 
 	if !r.Serializable {
@@ -141,6 +155,12 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 }
 
 func (s *EtcdServer) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "put", trace.WithAttributes(
+		attribute.String("key", string(r.GetKey())),
+	))
+	defer span.End()
+
 	ctx = context.WithValue(ctx, traceutil.StartTimeKey{}, time.Now())
 	resp, err := s.raftRequest(ctx, pb.InternalRaftRequest{Put: r})
 	if err != nil {
@@ -150,6 +170,13 @@ func (s *EtcdServer) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse
 }
 
 func (s *EtcdServer) DeleteRange(ctx context.Context, r *pb.DeleteRangeRequest) (*pb.DeleteRangeResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "delete_range", trace.WithAttributes(
+		attribute.String("range_begin", string(r.GetKey())),
+		attribute.String("range_end", string(r.GetRangeEnd())),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequest(ctx, pb.InternalRaftRequest{DeleteRange: r})
 	if err != nil {
 		return nil, err
@@ -158,12 +185,25 @@ func (s *EtcdServer) DeleteRange(ctx context.Context, r *pb.DeleteRangeRequest) 
 }
 
 func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse, error) {
-	if txn.IsTxnReadonly(r) {
-		trace := traceutil.New("transaction",
-			s.Logger(),
-			traceutil.Field{Key: "read_only", Value: true},
-		)
-		ctx = context.WithValue(ctx, traceutil.TraceKey{}, trace)
+	readOnly := txn.IsTxnReadonly(r)
+
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "txn", trace.WithAttributes(
+		attribute.String("compare_first_key", firstCompareKey(r.GetCompare())),
+		attribute.String("success_first_key", firstOpKey(r.GetSuccess())),
+		attribute.String("success_first_type", firstOpType(r.GetSuccess())),
+		attribute.Int64("success_first_lease", firstOpLease(r.GetSuccess())),
+		attribute.Int("compare_len", len(r.GetCompare())),
+		attribute.Int("success_len", len(r.GetSuccess())),
+		attribute.Int("failure_len", len(r.GetFailure())),
+		attribute.Bool("read_only", readOnly),
+	))
+	defer span.End()
+
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "transaction",
+		traceutil.Field{Key: "read_only", Value: readOnly},
+	)
+	if readOnly {
 		if !txn.IsTxnSerializable(r) {
 			err := s.linearizableReadNotify(ctx)
 			trace.Step("agreement among raft nodes before linearized reading")
@@ -180,10 +220,12 @@ func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse
 		defer func(start time.Time) {
 			txn.WarnOfExpensiveReadOnlyTxnRequest(s.Logger(), s.Cfg.WarningApplyDuration, start, r, resp, err)
 			trace.LogIfLong(traceThreshold)
+			success := err == nil
+			requestDurationSec.WithLabelValues("ReadonlyTxn", strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
 		}(time.Now())
 
 		get := func() {
-			resp, _, err = txn.Txn(ctx, s.Logger(), r, s.Cfg.ExperimentalTxnModeWriteWithSharedBuffer, s.KV(), s.lessor)
+			resp, _, err = txn.Txn(ctx, s.Logger(), r, s.Cfg.ServerFeatureGate.Enabled(features.TxnModeWriteWithSharedBuffer), s.KV(), s.lessor)
 		}
 		if serr := s.doSerialize(ctx, chk, get); serr != nil {
 			return nil, serr
@@ -200,9 +242,16 @@ func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse
 }
 
 func (s *EtcdServer) Compact(ctx context.Context, r *pb.CompactionRequest) (*pb.CompactionResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "compact", trace.WithAttributes(
+		attribute.Bool("is_physical", r.GetPhysical()),
+		attribute.Int64("rev", r.GetRevision()),
+	))
+	defer span.End()
+
 	startTime := time.Now()
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "compact")
 	result, err := s.processInternalRaftRequestOnce(ctx, pb.InternalRaftRequest{Compaction: r})
-	trace := traceutil.TODO()
 	if result != nil && result.Trace != nil {
 		trace = result.Trace
 		defer func() {
@@ -250,6 +299,13 @@ func (s *EtcdServer) LeaseGrant(ctx context.Context, r *pb.LeaseGrantRequest) (*
 		// only use positive int64 id's
 		r.ID = int64(s.reqIDGen.Next() & ((1 << 63) - 1))
 	}
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_grant", trace.WithAttributes(
+		attribute.Int64("id", r.ID),
+		attribute.Int64("ttl", r.GetTTL()),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequestOnce(ctx, pb.InternalRaftRequest{LeaseGrant: r})
 	if err != nil {
 		return nil, err
@@ -270,6 +326,12 @@ func (s *EtcdServer) waitAppliedIndex() error {
 }
 
 func (s *EtcdServer) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) (*pb.LeaseRevokeResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_revoke", trace.WithAttributes(
+		attribute.Int64("id", r.GetID()),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequestOnce(ctx, pb.InternalRaftRequest{LeaseRevoke: r})
 	if err != nil {
 		return nil, err
@@ -278,6 +340,12 @@ func (s *EtcdServer) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) 
 }
 
 func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_renew", trace.WithAttributes(
+		attribute.Int64("id", int64(id)),
+	))
+	defer span.End()
+
 	if s.isLeader() {
 		// If s.isLeader() returns true, but we fail to ensure the current
 		// member's leadership, there are a couple of possibilities:
@@ -289,8 +357,22 @@ func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, e
 		if !s.ensureLeadership() {
 			return -1, lease.ErrNotPrimary
 		}
-		if err := s.waitAppliedIndex(); err != nil {
-			return 0, err
+
+		// This change aims to make lease renewal faster under high server load
+		// while preserving correctness. If a lease is not found, it might still be in
+		// the process of being created. We must wait for the applied index to advance
+		// to verify whether the lease truly does not exist.
+		if s.FeatureEnabled(features.FastLeaseKeepAlive) {
+			le := s.lessor.Lookup(id)
+			if le == nil {
+				if err := s.waitAppliedIndex(); err != nil {
+					return 0, err
+				}
+			}
+		} else {
+			if err := s.waitAppliedIndex(); err != nil {
+				return 0, err
+			}
 		}
 
 		ttl, err := s.lessor.Renew(id)
@@ -322,10 +404,16 @@ func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, e
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if errorspkg.Is(cctx.Err(), context.DeadlineExceeded) {
+	err := cctx.Err()
+	switch {
+	case errorspkg.Is(err, context.DeadlineExceeded):
 		return -1, errors.ErrTimeout
+	case errorspkg.Is(err, context.Canceled):
+		return -1, errors.ErrCanceled
+	default:
+		s.Logger().Warn("Unexpected lease renew context error", zap.Error(err))
+		return -1, errors.ErrCanceled
 	}
-	return -1, errors.ErrCanceled
 }
 
 func (s *EtcdServer) checkLeaseTimeToLive(ctx context.Context, leaseID lease.LeaseID) (uint64, error) {
@@ -689,6 +777,7 @@ func (s *EtcdServer) RoleDelete(ctx context.Context, r *pb.AuthRoleDeleteRequest
 func (s *EtcdServer) raftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (proto.Message, error) {
 	result, err := s.processInternalRaftRequestOnce(ctx, r)
 	if err != nil {
+		trace.SpanFromContext(ctx).RecordError(err)
 		return nil, err
 	}
 	if result.Err != nil {
@@ -758,7 +847,18 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 		}
 	}
 
-	data, err := r.Marshal()
+	var (
+		data    []byte
+		err     error
+		start   = time.Now()
+		reqType = getRequestType(&r)
+	)
+	defer func() {
+		success := err == nil
+		requestDurationSec.WithLabelValues(reqType, strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
+	}()
+
+	data, err = r.Marshal()
 	if err != nil {
 		return nil, err
 	}
@@ -776,7 +876,8 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 	cctx, cancel := context.WithTimeout(ctx, s.Cfg.ReqTimeout())
 	defer cancel()
 
-	start := time.Now()
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("Send raft proposal")
 	err = s.r.Propose(cctx, data)
 	if err != nil {
 		proposalsFailed.Inc()
@@ -788,6 +889,7 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 
 	select {
 	case x := <-ch:
+		span.AddEvent("Receive raft result")
 		return x.(*apply2.Result), nil
 	case <-cctx.Done():
 		proposalsFailed.Inc()
@@ -795,6 +897,73 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 		return nil, s.parseProposeCtxErr(cctx.Err(), start)
 	case <-s.done:
 		return nil, errors.ErrStopped
+	}
+}
+
+func getRequestType(r *pb.InternalRaftRequest) string {
+	switch {
+	case r.Range != nil:
+		return "Range"
+	case r.Put != nil:
+		return "Put"
+	case r.DeleteRange != nil:
+		return "DeleteRange"
+	case r.Txn != nil:
+		return "Txn"
+	case r.Compaction != nil:
+		return "Compaction"
+	case r.LeaseGrant != nil:
+		return "LeaseGrant"
+	case r.LeaseRevoke != nil:
+		return "LeaseRevoke"
+	case r.LeaseCheckpoint != nil:
+		return "LeaseCheckpoint"
+	case r.Alarm != nil:
+		return "Alarm"
+	case r.Authenticate != nil:
+		return "Authenticate"
+	case r.AuthEnable != nil:
+		return "AuthEnable"
+	case r.AuthDisable != nil:
+		return "AuthDisable"
+	case r.AuthStatus != nil:
+		return "AuthStatus"
+	case r.AuthUserAdd != nil:
+		return "AuthUserAdd"
+	case r.AuthUserDelete != nil:
+		return "AuthUserDelete"
+	case r.AuthUserChangePassword != nil:
+		return "AuthUserChangePassword"
+	case r.AuthUserGrantRole != nil:
+		return "AuthUserGrantRole"
+	case r.AuthUserGet != nil:
+		return "AuthUserGet"
+	case r.AuthUserRevokeRole != nil:
+		return "AuthUserRevokeRole"
+	case r.AuthRoleAdd != nil:
+		return "AuthRoleAdd"
+	case r.AuthRoleGrantPermission != nil:
+		return "AuthRoleGrantPermission"
+	case r.AuthRoleGet != nil:
+		return "AuthRoleGet"
+	case r.AuthRoleRevokePermission != nil:
+		return "AuthRoleRevokePermission"
+	case r.AuthRoleDelete != nil:
+		return "AuthRoleDelete"
+	case r.AuthUserList != nil:
+		return "AuthUserList"
+	case r.AuthRoleList != nil:
+		return "AuthRoleList"
+	case r.ClusterVersionSet != nil:
+		return "ClusterVersionSet"
+	case r.ClusterMemberAttrSet != nil:
+		return "ClusterMemberAttrSet"
+	case r.DowngradeInfoSet != nil:
+		return "DowngradeInfoSet"
+	case r.DowngradeVersionTest != nil:
+		return "DowngradeVersionTest"
+	default:
+		return "Unknown"
 	}
 }
 
@@ -815,7 +984,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 
 		// as a single loop is can unlock multiple reads, it is not very useful
 		// to propagate the trace from Txn or Range.
-		trace := traceutil.New("linearizableReadLoop", s.Logger())
+		_, trace := traceutil.EnsureTrace(context.Background(), s.Logger(), "linearizableReadLoop")
 
 		nextnr := newNotifier()
 		s.readMu.Lock()

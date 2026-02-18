@@ -15,7 +15,6 @@
 package snapshot
 
 import (
-	"context"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -44,7 +43,7 @@ func TestSnapshotStatus(t *testing.T) {
 	status, err := NewV3(zap.NewNop()).Status(dbpath)
 	require.NoError(t, err)
 
-	assert.Equal(t, uint32(0x62132b4d), status.Hash)
+	assert.Equal(t, uint32(0xe7a6e44b), status.Hash)
 	assert.Equal(t, int64(11), status.Revision)
 }
 
@@ -118,6 +117,106 @@ func TestSnapshotStatusNegativeRevisionSub(t *testing.T) {
 	require.ErrorContains(t, err, "negative revision")
 }
 
+// TestSnapshotStatusTotalKey tests if snapshot status command correctly reports total number of valid keys.
+func TestSnapshotStatusTotalKey(t *testing.T) {
+	cases := []struct {
+		name     string
+		prepare  func(srv *etcdserver.EtcdServer)
+		expected int
+	}{
+		{
+			name: "duplicate keys",
+			prepare: func(srv *etcdserver.EtcdServer) {
+				keys := []string{"key1", "key2", "key1"}
+				val := make([]byte, len(keys))
+				for _, key := range keys {
+					for i := 0; i < 3; i++ {
+						req := etcdserverpb.PutRequest{
+							Key:   []byte(key),
+							Value: val,
+						}
+						_, err := srv.Put(t.Context(), &req)
+						require.NoError(t, err)
+					}
+				}
+			},
+			expected: 2,
+		},
+		{
+			name: "mixed revisions",
+			prepare: func(srv *etcdserver.EtcdServer) {
+				// key1: create -> put -> delete
+				key := []byte("key1")
+				for i := 0; i < 3; i++ {
+					if i < 2 {
+						_, err := srv.Put(t.Context(), &etcdserverpb.PutRequest{Key: key, Value: []byte(strconv.Itoa(i))})
+						require.NoError(t, err)
+					} else {
+						_, err := srv.DeleteRange(t.Context(), &etcdserverpb.DeleteRangeRequest{Key: key})
+						require.NoError(t, err)
+					}
+				}
+			},
+			expected: 0,
+		},
+		{
+			name: "ignored tombstones",
+			prepare: func(srv *etcdserver.EtcdServer) {
+				// key1: create -> delete -> re-create -> delete
+				key := []byte("key1")
+				for i := 0; i < 2; i++ {
+					_, err := srv.Put(t.Context(), &etcdserverpb.PutRequest{Key: key, Value: make([]byte, 1)})
+					require.NoError(t, err)
+					_, err = srv.DeleteRange(t.Context(), &etcdserverpb.DeleteRangeRequest{Key: key})
+					require.NoError(t, err)
+				}
+			},
+			expected: 0,
+		},
+		{
+			name: "restored keys",
+			prepare: func(srv *etcdserver.EtcdServer) {
+				// key1: create -> delete -> re-create -> delete -> re-create
+				key := []byte("key1")
+				for i := 0; i < 5; i++ {
+					if i%2 == 0 {
+						_, err := srv.Put(t.Context(), &etcdserverpb.PutRequest{Key: key, Value: make([]byte, 1)})
+						require.NoError(t, err)
+					} else {
+						_, err := srv.DeleteRange(t.Context(), &etcdserverpb.DeleteRangeRequest{Key: key})
+						require.NoError(t, err)
+					}
+				}
+			},
+			expected: 1,
+		},
+		{
+			name: "mixed deletions",
+			prepare: func(srv *etcdserver.EtcdServer) {
+				// Put("key1") -> Put("key2")-> Delete("key1")
+				_, err := srv.Put(t.Context(), &etcdserverpb.PutRequest{Key: []byte("key1"), Value: make([]byte, 1)})
+				require.NoError(t, err)
+				_, err = srv.Put(t.Context(), &etcdserverpb.PutRequest{Key: []byte("key2"), Value: make([]byte, 1)})
+				require.NoError(t, err)
+				_, err = srv.DeleteRange(t.Context(), &etcdserverpb.DeleteRangeRequest{Key: []byte("key1")})
+				require.NoError(t, err)
+			},
+			expected: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbpath := createDB(t, tc.prepare)
+
+			status, err := NewV3(zap.NewNop()).Status(dbpath)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.expected, status.TotalKey)
+		})
+	}
+}
+
 // insertKeys insert `numKeys` number of keys of `valueSize` size into a running etcd server.
 func insertKeys(t *testing.T, numKeys, valueSize int) func(*etcdserver.EtcdServer) {
 	t.Helper()
@@ -128,7 +227,7 @@ func insertKeys(t *testing.T, numKeys, valueSize int) func(*etcdserver.EtcdServe
 				Key:   []byte(strconv.Itoa(i)),
 				Value: val,
 			}
-			_, err := srv.Put(context.TODO(), &req)
+			_, err := srv.Put(t.Context(), &req)
 			require.NoError(t, err)
 		}
 	}
@@ -141,6 +240,7 @@ func createDB(t *testing.T, generateContent func(*etcdserver.EtcdServer)) string
 	t.Helper()
 
 	cfg := embed.NewConfig()
+	cfg.BackendBatchLimit = 1
 	cfg.LogLevel = "fatal"
 	cfg.Dir = t.TempDir()
 

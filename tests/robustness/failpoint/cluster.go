@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
@@ -34,7 +36,11 @@ import (
 	"go.etcd.io/etcd/tests/v3/robustness/traffic"
 )
 
-var MemberReplace Failpoint = memberReplace{}
+var (
+	MemberReplace          Failpoint = memberReplace{}
+	MemberDowngrade        Failpoint = memberDowngrade{}
+	MemberDowngradeUpgrade Failpoint = memberDowngradeUpgrade{}
+)
 
 type memberReplace struct{}
 
@@ -136,6 +142,134 @@ func (f memberReplace) Name() string {
 func (f memberReplace) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
 	// a lower etcd version may not be able to join a cluster with higher cluster version.
 	return config.ClusterSize > 1 && (config.Version == e2e.QuorumLastVersion || member.Config().ExecPath == e2e.BinPath.Etcd)
+}
+
+type memberDowngrade struct{}
+
+func (f memberDowngrade) Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, baseTime time.Time, ids identity.Provider) ([]report.ClientReport, error) {
+	currentVersion, err := e2e.GetVersionFromBinary(e2e.BinPath.Etcd)
+	if err != nil {
+		return nil, err
+	}
+	lastVersion, err := e2e.GetVersionFromBinary(e2e.BinPath.EtcdLastRelease)
+	if err != nil {
+		return nil, err
+	}
+	numberOfMembersToDowngrade := rand.Int()%len(clus.Procs) + 1
+
+	member := clus.Procs[0]
+	endpoints := []string{member.EndpointsGRPC()[0]}
+	cc, err := clientv3.New(clientv3.Config{
+		Endpoints:            endpoints,
+		Logger:               zap.NewNop(),
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 100 * time.Millisecond,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cc.Close()
+
+	// Need to wait health interval for cluster to accept changes
+	time.Sleep(etcdserver.HealthInterval)
+	e2e.DowngradeEnable(t, clus, lastVersion)
+
+	err = e2e.DowngradeUpgradeMembers(t, lg, clus, numberOfMembersToDowngrade, true, currentVersion, lastVersion)
+	time.Sleep(etcdserver.HealthInterval)
+	return nil, err
+}
+
+func (f memberDowngrade) Name() string {
+	return "MemberDowngrade"
+}
+
+func (f memberDowngrade) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
+	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
+		return false
+	}
+	// only run memberDowngrade test if no snapshot would be sent between members.
+	// see https://github.com/etcd-io/etcd/issues/19147 for context.
+	if config.ServerConfig.SnapshotCatchUpEntries < etcdserver.DefaultSnapshotCatchUpEntries {
+		return false
+	}
+	v, err := e2e.GetVersionFromBinary(e2e.BinPath.Etcd)
+	if err != nil {
+		panic("Failed checking etcd version binary")
+	}
+	v3_6 := semver.Version{Major: 3, Minor: 6}
+	// only current version cluster can be downgraded.
+	return v.Compare(v3_6) >= 0 && (config.Version == e2e.CurrentVersion && member.Config().ExecPath == e2e.BinPath.Etcd)
+}
+
+type memberDowngradeUpgrade struct{}
+
+func (f memberDowngradeUpgrade) Inject(ctx context.Context, t *testing.T, lg *zap.Logger, clus *e2e.EtcdProcessCluster, baseTime time.Time, ids identity.Provider) ([]report.ClientReport, error) {
+	currentVersion, err := e2e.GetVersionFromBinary(e2e.BinPath.Etcd)
+	if err != nil {
+		return nil, err
+	}
+	lastVersion, err := e2e.GetVersionFromBinary(e2e.BinPath.EtcdLastRelease)
+	if err != nil {
+		return nil, err
+	}
+
+	member := clus.Procs[0]
+	endpoints := []string{member.EndpointsGRPC()[0]}
+	cc, err := clientv3.New(clientv3.Config{
+		Endpoints:            endpoints,
+		Logger:               zap.NewNop(),
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 100 * time.Millisecond,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cc.Close()
+
+	e2e.DowngradeEnable(t, clus, lastVersion)
+	// downgrade all members first
+	err = e2e.DowngradeUpgradeMembers(t, lg, clus, len(clus.Procs), true, currentVersion, lastVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	// NOTE: By default, the leader can cancel the downgrade once all members
+	// have reached the target version. However, determining the final stable
+	// cluster version after an upgrade can be challenging. To ensure stability,
+	// we should wait for the leader to cancel the downgrade process.
+	e2e.AssertProcessLogs(t, clus.Procs[clus.WaitLeader(t)], "the cluster has been downgraded")
+
+	// partial upgrade the cluster
+	numberOfMembersToUpgrade := rand.Int()%len(clus.Procs) + 1
+	err = e2e.DowngradeUpgradeMembers(t, lg, clus, numberOfMembersToUpgrade, false, lastVersion, currentVersion)
+	time.Sleep(etcdserver.HealthInterval)
+	return nil, err
+}
+
+func (f memberDowngradeUpgrade) Name() string {
+	return "MemberDowngradeUpgrade"
+}
+
+func (f memberDowngradeUpgrade) Available(config e2e.EtcdProcessClusterConfig, member e2e.EtcdProcess, profile traffic.Profile) bool {
+	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
+		return false
+	}
+	// only run memberDowngrade test if no snapshot would be sent between members.
+	// see https://github.com/etcd-io/etcd/issues/19147 for context.
+	if config.ServerConfig.SnapshotCatchUpEntries < etcdserver.DefaultSnapshotCatchUpEntries {
+		return false
+	}
+	v, err := e2e.GetVersionFromBinary(e2e.BinPath.Etcd)
+	if err != nil {
+		panic("Failed checking etcd version binary")
+	}
+	v3_6 := semver.Version{Major: 3, Minor: 6}
+	// only current version cluster can be downgraded.
+	return v.Compare(v3_6) >= 0 && (config.Version == e2e.CurrentVersion && member.Config().ExecPath == e2e.BinPath.Etcd)
+}
+
+func (f memberDowngradeUpgrade) Timeout() time.Duration {
+	return 120 * time.Second
 }
 
 func getID(ctx context.Context, cc *clientv3.Client, name string) (id uint64, found bool, err error) {

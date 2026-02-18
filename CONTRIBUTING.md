@@ -55,7 +55,7 @@ For more, because etcd uses Kubernetes' prow infrastructure to run CI jobs, the 
 | periodics e2e-amd64  | [![sig-etcd-periodics/ci-etcd-e2e-amd64](https://testgrid.k8s.io/q/summary/sig-etcd-periodics/ci-etcd-e2e-amd64/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-periodics/ci-etcd-e2e-amd64)  |
 | presubmit build      | [![sig-etcd-presubmits/pull-etcd-build](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-build/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-build)  |
 | presubmit e2e-amd64  | [![sig-etcd-presubmits/pull-etcd-e2e-amd64](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-e2e-amd64/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-e2e-amd64)  |
-| presubmit unit-test  | [![sig-etcd-presubmits/pull-etcd-unit-test](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-unit-test/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-unit-test)  |
+| presubmit unit-test-amd64  | [![sig-etcd-presubmits/pull-etcd-unit-test-amd64](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-unit-test-amd64/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-unit-test-amd64)  |
 | presubmit verify     | [![sig-etcd-presubmits/pull-etcd-verify](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-verify/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-presubmits/pull-etcd-verify)  |
 | postsubmit build     | [![sig-etcd-postsubmits/post-etcd-build](https://testgrid.k8s.io/q/summary/sig-etcd-postsubmits/post-etcd-build/tests_status?style=svg)](https://testgrid.k8s.io/q/summary/sig-etcd-postsubmits/post-etcd-build)  |
 
@@ -95,9 +95,17 @@ Follow the steps below to set up the environment:
 - [Clone the repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)
 - Install Go by following [installation](https://go.dev/doc/install). Please check the minimal go version in [go.mod file](./go.mod#L3).
 - Install build tools:
-  - `make`: For Debian-based distributions you can run `sudo apt-get install build-essential`
-  - `protoc`: You can download it for your os. Use version [`v3.20.3`](https://github.com/protocolbuffers/protobuf/releases/tag/v3.20.3).
-  - `yamllint`: For Debian-based distribution you can run `sudo apt-get install yamllint`
+  - [`make`](https://www.gnu.org/software/make/): For Debian-based distributions
+    you can run `sudo apt-get install build-essential`
+  - [`protoc`](https://protobuf.dev/): You can download it for your os. Use
+    version
+    [`v3.20.3`](https://github.com/protocolbuffers/protobuf/releases/tag/v3.20.3).
+  - [`yamllint`](https://www.yamllint.com/): For Debian-based distribution you
+    can run `sudo apt-get install yamllint`
+  - [`jq`](https://jqlang.github.io/jq/): For Debian-based distribution you can
+    run `sudo apt-get install jq`
+  - [`xz`](https://tukaani.org/xz/): For Debian-based distribution you can run
+    `sudo apt-get install xz-utils`
 - Verify that everything is installed by running `make build`
 
 Note: `make build` runs with `-v`. Other build flags can be added through env `GO_BUILD_FLAGS`, **if required**. Eg.,
@@ -124,9 +132,10 @@ A codespace will open in a web-based version of Visual Studio Code. The [dev con
 ## Implement your change
 
 etcd code should follow the coding style suggested by the Golang community.
-See the [style doc](https://github.com/golang/go/wiki/CodeReviewComments) for details.
+See the [style doc](https://go.dev/wiki/CodeReviewComments) for details.
 
-Please ensure that your change passes static analysis (requires [golangci-lint](https://golangci-lint.run/usage/install/)):
+Please ensure that your change passes static analysis (requires
+[golangci-lint](https://golangci-lint.run/welcome/install/)):
 - `make verify` to verify if all checks pass.
 - `make verify-*` to verify a single check, for example, `make verify-bom` to verify if `bill-of-materials.json` file is up-to-date.
 - `make fix` to fix all checks.

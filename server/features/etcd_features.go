@@ -35,16 +35,16 @@ const (
 	// of code conflicts because changes are more likely to be scattered
 	// across the file.
 
-	// DistributedTracing enables experimental distributed  tracing using OpenTelemetry Tracing.
-	// owner: @dashpole
-	// alpha: v3.5
-	// issue: https://github.com/etcd-io/etcd/issues/12460
-	DistributedTracing featuregate.Feature = "DistributedTracing"
 	// StopGRPCServiceOnDefrag enables etcd gRPC service to stop serving client requests on defragmentation.
 	// owner: @chaochn47
 	// alpha: v3.6
 	// main PR: https://github.com/etcd-io/etcd/pull/18279
 	StopGRPCServiceOnDefrag featuregate.Feature = "StopGRPCServiceOnDefrag"
+	// TxnModeWriteWithSharedBuffer enables the write transaction to use a shared buffer in its readonly check operations.
+	// owner: @wilsonwang371
+	// beta: v3.5
+	// main PR: https://github.com/etcd-io/etcd/pull/12896
+	TxnModeWriteWithSharedBuffer featuregate.Feature = "TxnModeWriteWithSharedBuffer"
 	// InitialCorruptCheck enable to check data corruption before serving any client/peer traffic.
 	// owner: @serathius
 	// alpha: v3.6
@@ -55,24 +55,42 @@ const (
 	// alpha: v3.6
 	// main PR: https://github.com/etcd-io/etcd/pull/14120
 	CompactHashCheck featuregate.Feature = "CompactHashCheck"
+	// LeaseCheckpoint enables leader to send regular checkpoints to other members to prevent reset of remaining TTL on leader change.
+	// owner: @serathius
+	// alpha: v3.6
+	// main PR: https://github.com/etcd-io/etcd/pull/13508
+	LeaseCheckpoint featuregate.Feature = "LeaseCheckpoint"
+	// LeaseCheckpointPersist enables persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled.
+	// Requires EnableLeaseCheckpoint featuragate to be enabled.
+	// TODO: Delete in v3.7
+	// owner: @serathius
+	// alpha: v3.6
+	// main PR: https://github.com/etcd-io/etcd/pull/13508
+	// Deprecated: Enabled by default in v3.6, to be removed in v3.7.
+	LeaseCheckpointPersist featuregate.Feature = "LeaseCheckpointPersist"
+	// SetMemberLocalAddr enables using the first specified and non-loopback local address from initial-advertise-peer-urls as the local address when communicating with a peer.
+	// Requires SetMemberLocalAddr featuragate to be enabled.
+	// owner: @flawedmatrix
+	// alpha: v3.6
+	// main PR: https://github.com/etcd-io/etcd/pull/17661
+	SetMemberLocalAddr featuregate.Feature = "SetMemberLocalAddr"
+	// FastLeaseKeepAlive enables lease renewal to skip waiting for the applied index.
+	// owner: @aaronjzhang
+	// beta: v3.7
+	// main PR: https://github.com/etcd-io/etcd/pull/20589
+	FastLeaseKeepAlive featuregate.Feature = "FastLeaseKeepAlive"
 )
 
-var (
-	DefaultEtcdServerFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		DistributedTracing:      {Default: false, PreRelease: featuregate.Alpha},
-		StopGRPCServiceOnDefrag: {Default: false, PreRelease: featuregate.Alpha},
-		InitialCorruptCheck:     {Default: false, PreRelease: featuregate.Alpha},
-		CompactHashCheck:        {Default: false, PreRelease: featuregate.Alpha},
-	}
-	// ExperimentalFlagToFeatureMap is the map from the cmd line flags of experimental features
-	// to their corresponding feature gates.
-	// Deprecated: only add existing experimental features here. DO NOT use for new features.
-	ExperimentalFlagToFeatureMap = map[string]featuregate.Feature{
-		"experimental-stop-grpc-service-on-defrag": StopGRPCServiceOnDefrag,
-		"experimental-initial-corrupt-check":       InitialCorruptCheck,
-		"experimental-compact-hash-check-enabled":  CompactHashCheck,
-	}
-)
+var DefaultEtcdServerFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+	StopGRPCServiceOnDefrag:      {Default: false, PreRelease: featuregate.Alpha},
+	InitialCorruptCheck:          {Default: false, PreRelease: featuregate.Alpha},
+	CompactHashCheck:             {Default: false, PreRelease: featuregate.Alpha},
+	TxnModeWriteWithSharedBuffer: {Default: true, PreRelease: featuregate.Beta},
+	LeaseCheckpoint:              {Default: false, PreRelease: featuregate.Alpha},
+	LeaseCheckpointPersist:       {Default: false, PreRelease: featuregate.Alpha},
+	SetMemberLocalAddr:           {Default: false, PreRelease: featuregate.Alpha},
+	FastLeaseKeepAlive:           {Default: true, PreRelease: featuregate.Beta},
+}
 
 func NewDefaultServerFeatureGate(name string, lg *zap.Logger) featuregate.FeatureGate {
 	fg := featuregate.New(fmt.Sprintf("%sServerFeatureGate", name), lg)

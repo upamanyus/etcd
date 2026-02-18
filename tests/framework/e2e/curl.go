@@ -123,8 +123,13 @@ func CURLPut(clus *EtcdProcessCluster, req CURLReq) error {
 }
 
 func CURLGet(clus *EtcdProcessCluster, req CURLReq) error {
+	member := clus.Procs[rand.Intn(clus.Cfg.ClusterSize)]
+	return CURLGetFromMember(clus, member, req)
+}
+
+func CURLGetFromMember(clus *EtcdProcessCluster, member EtcdProcess, req CURLReq) error {
 	ctx, cancel := context.WithTimeout(context.Background(), req.timeoutDuration())
 	defer cancel()
 
-	return SpawnWithExpectsContext(ctx, CURLPrefixArgsCluster(clus.Cfg, clus.Procs[rand.Intn(clus.Cfg.ClusterSize)], "GET", req), nil, req.Expected)
+	return SpawnWithExpectsContext(ctx, CURLPrefixArgsCluster(clus.Cfg, member, "GET", req), nil, req.Expected)
 }

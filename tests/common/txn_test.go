@@ -59,23 +59,21 @@ func TestTxnSucc(t *testing.T) {
 	}
 	for _, cfg := range clusterTestCases() {
 		t.Run(cfg.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(cfg.config))
 			defer clus.Close()
 			cc := testutils.MustClient(clus.Client())
 			testutils.ExecuteUntil(ctx, t, func() {
-				err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
+				_, err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
 				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key1", "value1")
-				err = cc.Put(ctx, "key2", "value2", config.PutOptions{})
+				_, err = cc.Put(ctx, "key2", "value2", config.PutOptions{})
 				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key2", "value2")
 				for _, req := range reqs {
 					resp, err := cc.Txn(ctx, req.compare, req.ifSuccess, req.ifFail, config.TxnOptions{
 						Interactive: true,
 					})
-					if err != nil {
-						t.Errorf("Txn returned error: %s", err)
-					}
+					require.NoErrorf(t, err, "Txn returned error: %s", err)
 					assert.Equal(t, req.expectResults, getRespValues(resp))
 				}
 			})
@@ -101,21 +99,19 @@ func TestTxnFail(t *testing.T) {
 	}
 	for _, cfg := range clusterTestCases() {
 		t.Run(cfg.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(cfg.config))
 			defer clus.Close()
 			cc := testutils.MustClient(clus.Client())
 			testutils.ExecuteUntil(ctx, t, func() {
-				err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
+				_, err := cc.Put(ctx, "key1", "value1", config.PutOptions{})
 				require.NoErrorf(t, err, "could not create key:%s, value:%s", "key1", "value1")
 				for _, req := range reqs {
 					resp, err := cc.Txn(ctx, req.compare, req.ifSuccess, req.ifFail, config.TxnOptions{
 						Interactive: true,
 					})
-					if err != nil {
-						t.Errorf("Txn returned error: %s", err)
-					}
+					require.NoErrorf(t, err, "Txn returned error: %s", err)
 					assert.Equal(t, req.expectResults, getRespValues(resp))
 				}
 			})

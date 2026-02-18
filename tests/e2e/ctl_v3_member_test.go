@@ -47,6 +47,15 @@ func TestCtlV3MemberAdd(t *testing.T)          { testCtl(t, memberAddTest) }
 func TestCtlV3MemberAddAsLearner(t *testing.T) { testCtl(t, memberAddAsLearnerTest) }
 
 func TestCtlV3MemberUpdate(t *testing.T) { testCtl(t, memberUpdateTest) }
+
+func TestCtlV3MemberPromoteWithAuthFromLeader(t *testing.T) {
+	testCtl(t, memberPromoteWithAuth(false), withTestTimeout(30*time.Second))
+}
+
+func TestCtlV3MemberPromoteWithAuthFromFollower(t *testing.T) {
+	testCtl(t, memberPromoteWithAuth(true), withTestTimeout(30*time.Second))
+}
+
 func TestCtlV3MemberUpdateNoTLS(t *testing.T) {
 	testCtl(t, memberUpdateTest, withCfg(*e2e.NewConfigNoTLS()))
 }
@@ -69,7 +78,7 @@ func TestCtlV3MemberUpdatePeerTLS(t *testing.T) {
 func TestCtlV3ConsistentMemberList(t *testing.T) {
 	e2e.BeforeTest(t)
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t,
 		e2e.WithClusterSize(1),
@@ -264,6 +273,49 @@ func memberAddAsLearnerTest(cx ctlCtx) {
 	require.NoError(cx.t, ctlV3MemberAdd(cx, peerURL, true))
 }
 
+func memberPromoteWithAuth(fromFollower bool) func(cx ctlCtx) {
+	return func(cx ctlCtx) {
+		ctx := context.Background()
+
+		// Add a regular member
+		_, err := cx.epc.StartNewProc(ctx, nil, cx.t, false)
+		require.NoError(cx.t, err)
+
+		var learnerID uint64
+		var addErr error
+		for {
+			// Add a learner once the cluster is healthy
+			learnerID, addErr = cx.epc.StartNewProc(ctx, nil, cx.t, true)
+			if addErr != nil {
+				if strings.Contains(addErr.Error(), "etcdserver: unhealthy cluster") {
+					time.Sleep(1 * time.Second)
+					continue
+				}
+			}
+			break
+		}
+		require.NoError(cx.t, addErr)
+
+		leaderIdx := cx.epc.WaitLeader(cx.t)
+		followerIdx := (leaderIdx + 1) % len(cx.epc.Procs)
+
+		require.NoError(cx.t, authEnable(cx))
+		cx.user, cx.pass = "root", "root"
+
+		if fromFollower {
+			_, err = cx.epc.Procs[followerIdx].
+				Etcdctl(e2e.WithAuth("root", "root")).
+				MemberPromote(ctx, learnerID)
+		} else {
+			_, err = cx.epc.Procs[leaderIdx].
+				Etcdctl(e2e.WithAuth("root", "root")).
+				MemberPromote(ctx, learnerID)
+		}
+
+		require.NoError(cx.t, err)
+	}
+}
+
 func ctlV3MemberAdd(cx ctlCtx, peerURL string, isLearner bool) error {
 	cmdArgs := append(cx.PrefixArgs(), "member", "add", "newmember", fmt.Sprintf("--peer-urls=%s", peerURL))
 	asLearner := " "
@@ -290,7 +342,7 @@ func ctlV3MemberUpdate(cx ctlCtx, memberID, peerURL string) error {
 
 func TestRemoveNonExistingMember(t *testing.T) {
 	e2e.BeforeTest(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	cfg := e2e.ConfigStandalone(*e2e.NewConfig())
 	epc, err := e2e.NewEtcdProcessCluster(ctx, t, e2e.WithConfig(cfg))
