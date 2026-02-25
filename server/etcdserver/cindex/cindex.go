@@ -15,8 +15,10 @@
 package cindex
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
@@ -109,14 +111,25 @@ func (ci *consistentIndex) UnsafeConsistentIndex() uint64 {
 	return v
 }
 
+func raceDelay() {
+	time.Sleep(100*time.Millisecond)
+	runtime.Gosched()
+}
+
 func (ci *consistentIndex) SetConsistentIndex(v uint64, term uint64) {
-	atomic.StoreUint64(&ci.consistentIndex, v)
-	atomic.StoreUint64(&ci.term, term)
+	// log.Printf("seti stack: %s\n", string(debug.Stack()))
+	raceDelay()
+	ci.consistentIndex = v
+	ci.term = term
+	raceDelay()
 }
 
 func (ci *consistentIndex) UnsafeSave(tx backend.UnsafeReadWriter) {
-	index := atomic.LoadUint64(&ci.consistentIndex)
-	term := atomic.LoadUint64(&ci.term)
+	// log.Printf("save stack: %s\n", string(debug.Stack()))
+	raceDelay()
+	index := ci.consistentIndex
+	term := ci.term
+	raceDelay()
 	schema.UnsafeUpdateConsistentIndex(tx, index, term)
 }
 
