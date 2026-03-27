@@ -16,10 +16,12 @@ package cache
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -422,6 +424,58 @@ func makePutEvent(key, val string, rev int64) *clientv3.Event {
 
 func makeDelEvent(key string, rev int64) *clientv3.Event {
 	return &clientv3.Event{Type: clientv3.EventTypeDelete, Kv: &mvccpb.KeyValue{Key: []byte(key), ModRevision: rev}}
+}
+
+// Ensures there are no data races between store.Apply() and store.Get(). Run
+// with -race.
+func TestStoreConcurrentGetApply(t *testing.T) {
+	s := newStore(4, 32)
+
+	s.Restore(nil, 10)
+	err := s.Apply(clientv3.WatchResponse{
+		Header: pb.ResponseHeader{Revision: 20},
+	})
+	if err != nil {
+		t.Fatalf("watch progress notification: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s.Get([]byte("/"), []byte{0}, 0)
+	}()
+
+	go func() {
+		defer wg.Done()
+		resp := clientv3.WatchResponse{
+			Events: []*clientv3.Event{makePutEvent("/key", "v1", 21)},
+		}
+		_ = s.Apply(resp)
+	}()
+
+	wg.Wait()
+}
+
+func TestGetRevisionGap(t *testing.T) {
+	s := newStore(4, 32)
+
+	// At revision 10, /a is b; revision 20 updates /a to c.
+	s.Restore([]*mvccpb.KeyValue{makeKV("/a", "b", 10)}, 10)
+	resp := clientv3.WatchResponse{Events: []*clientv3.Event{makePutEvent("/a", "c", 20)}}
+	if err := s.Apply(resp); err != nil {
+		t.Fatalf("Apply events: %v", err)
+	}
+
+	// Get with revision 15 should give v1
+	expectedKvs := []*mvccpb.KeyValue{makeKV("/a", "b", 10)}
+	kvs, _, err := s.Get([]byte("/"), []byte{0}, 15)
+	if err != nil {
+		t.Fatalf("Get(rev=15): %v", err)
+	}
+	if diff := cmp.Diff(expectedKvs, kvs); diff != "" {
+		t.Fatalf("Get(rev=15) mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func verifyStoreSnapshot(t *testing.T, s *store, want []*mvccpb.KeyValue, wantRev int64, requestedRev int64) {
