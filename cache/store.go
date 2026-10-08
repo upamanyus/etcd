@@ -146,7 +146,7 @@ func (s *store) applyProgressNotifyLocked(revision int64) {
 	s.revCond.Broadcast()
 }
 
-func (s *store) applyEventsLocked(events []*clientv3.Event) error {
+func (s *store) applyEventsLocked(events []*mvccpb.Event) error {
 	for i := 0; i < len(events); {
 		rev := events[i].Kv.ModRevision
 
@@ -182,7 +182,9 @@ func validateRevisions(resp clientv3.WatchResponse, latestRev int64) error {
 		}
 		return nil
 	}
-	events := resp.Events
+	// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+	// Goose does not resolve a type alias when it selects a field through a pointer.
+	var events []*mvccpb.Event = resp.Events
 	if len(events) == 0 {
 		return nil
 	}

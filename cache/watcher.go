@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -41,8 +42,11 @@ func newWatcher(bufSize int, pred KeyPredicate) *watcher {
 // false -> buffer full (caller should mark watcher “lagging”)
 func (w *watcher) enqueueResponse(resp clientv3.WatchResponse) bool {
 	if !resp.IsProgressNotify() && w.keyPred != nil {
-		filtered := make([]*clientv3.Event, 0, len(resp.Events))
-		for _, event := range resp.Events {
+		filtered := make([]*mvccpb.Event, 0, len(resp.Events))
+		// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+		// Goose does not resolve a type alias when it selects a field through a pointer.
+		var events []*mvccpb.Event = resp.Events
+		for _, event := range events {
 			if w.keyPred(event.Kv.Key) {
 				filtered = append(filtered, event)
 			}

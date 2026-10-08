@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -34,7 +35,7 @@ type demux struct {
 	// maxRev tracks highest seen revision; minRev sets watcher compaction threshold (updated to evictedRev+1 on history overflow)
 	minRev, maxRev int64
 	// History stores events within [minRev, maxRev].
-	history ringBuffer[[]*clientv3.Event]
+	history ringBuffer[[]*mvccpb.Event]
 	// resynced is used to notify that resync loop was completed.
 	resynced *notifier
 }
@@ -53,7 +54,7 @@ func newDemux(historyWindowSize int, resyncInterval time.Duration) *demux {
 	return &demux{
 		activeWatchers:  make(map[*watcher]int64),
 		laggingWatchers: make(map[*watcher]int64),
-		history:         *newRingBuffer(historyWindowSize, func(batch []*clientv3.Event) int64 { return batch[0].Kv.ModRevision }),
+		history:         *newRingBuffer(historyWindowSize, func(batch []*mvccpb.Event) int64 { return batch[0].Kv.ModRevision }),
 		resyncInterval:  resyncInterval,
 		resynced:        newNotifier(),
 	}
@@ -204,7 +205,9 @@ func (d *demux) updateStoreLocked(resp clientv3.WatchResponse) {
 	if len(resp.Events) == 0 {
 		return
 	}
-	events := resp.Events
+	// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+	// Goose does not resolve a type alias when it selects a field through a pointer.
+	var events []*mvccpb.Event = resp.Events
 	batchStart := 0
 	for end := 1; end < len(events); end++ {
 		if events[end].Kv.ModRevision != events[batchStart].Kv.ModRevision {
@@ -252,7 +255,7 @@ func (d *demux) broadcastProgressLocked(progressRev int64) {
 	}
 }
 
-func (d *demux) broadcastEventsLocked(events []*clientv3.Event) {
+func (d *demux) broadcastEventsLocked(events []*mvccpb.Event) {
 	firstRev := events[0].Kv.ModRevision
 	lastRev := events[len(events)-1].Kv.ModRevision
 
@@ -331,7 +334,7 @@ func (d *demux) resyncLaggingWatchers() {
 		}
 		// TODO: re-enable key‐predicate in Filter when non‐zero startRev or performance tuning is needed
 		resyncSuccess := true
-		d.history.AscendGreaterOrEqual(nextRev, func(rev int64, eventBatch []*clientv3.Event) bool {
+		d.history.AscendGreaterOrEqual(nextRev, func(rev int64, eventBatch []*mvccpb.Event) bool {
 			resp := clientv3.WatchResponse{
 				Events: eventBatch,
 			}
