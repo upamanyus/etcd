@@ -132,7 +132,11 @@ func (r *ringBuffer[T]) findFirstIndexGreaterOrEqual(pivot int64) int {
 	for left <= right {
 		// Prevent overflow; see https://github.com/golang/go/blob/master/src/sort/search.go#L105.
 		mid := int(uint(left+right) >> 1)
-		if r.at(mid).revision >= pivot {
+		// Gooseable: select the field from a variable, not from the call's result:
+		// Goose drops the type argument of entry[T] when it selects a field of a
+		// generic struct value.
+		ent := r.at(mid)
+		if ent.revision >= pivot {
 			right = mid - 1
 		} else {
 			left = mid + 1
@@ -146,7 +150,11 @@ func (r *ringBuffer[T]) findLastIndexLessOrEqual(pivot int64) int {
 	for left <= right {
 		// Prevent overflow; see https://github.com/golang/go/blob/master/src/sort/search.go#L105.
 		mid := int(uint(left+right) >> 1)
-		if r.at(mid).revision <= pivot {
+		// Gooseable: select the field from a variable, not from the call's result:
+		// Goose drops the type argument of entry[T] when it selects a field of a
+		// generic struct value.
+		ent := r.at(mid)
+		if ent.revision <= pivot {
 			left = mid + 1
 		} else {
 			right = mid - 1
