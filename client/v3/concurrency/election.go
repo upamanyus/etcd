@@ -71,7 +71,7 @@ func (e *Election) Campaign(ctx context.Context, val string) error {
 	client := e.session.Client()
 
 	k := fmt.Sprintf("%s%x", e.keyPrefix, s.Lease())
-	txn := client.Txn(ctx).If(v3.Compare(v3.CreateRevision(k), "=", 0))
+	txn := client.KV.Txn(ctx).If(v3.Compare(v3.CreateRevision(k), "=", 0))
 	txn = txn.Then(v3.OpPut(k, val, v3.WithLease(s.Lease())))
 	txn = txn.Else(v3.OpGet(k))
 	resp, err := txn.Commit()
@@ -113,7 +113,7 @@ func (e *Election) Proclaim(ctx context.Context, val string) error {
 	}
 	client := e.session.Client()
 	cmp := v3.Compare(v3.CreateRevision(e.leaderKey), "=", e.leaderRev)
-	txn := client.Txn(ctx).If(cmp)
+	txn := client.KV.Txn(ctx).If(cmp)
 	txn = txn.Then(v3.OpPut(e.leaderKey, val, v3.WithLease(e.leaderSession.Lease())))
 	tresp, terr := txn.Commit()
 	if terr != nil {
@@ -135,7 +135,7 @@ func (e *Election) Resign(ctx context.Context) (err error) {
 	}
 	client := e.session.Client()
 	cmp := v3.Compare(v3.CreateRevision(e.leaderKey), "=", e.leaderRev)
-	resp, err := client.Txn(ctx).If(cmp).Then(v3.OpDelete(e.leaderKey)).Commit()
+	resp, err := client.KV.Txn(ctx).If(cmp).Then(v3.OpDelete(e.leaderKey)).Commit()
 	if err == nil {
 		e.hdr = resp.Header
 	}
@@ -147,7 +147,7 @@ func (e *Election) Resign(ctx context.Context) (err error) {
 // Leader returns the leader value for the current election.
 func (e *Election) Leader(ctx context.Context) (*v3.GetResponse, error) {
 	client := e.session.Client()
-	resp, err := client.Get(ctx, e.keyPrefix, v3.WithFirstCreate()...)
+	resp, err := client.KV.Get(ctx, e.keyPrefix, v3.WithFirstCreate()...)
 	if err != nil {
 		return nil, err
 	} else if len(resp.Kvs) == 0 {
@@ -175,7 +175,7 @@ func (e *Election) observe(ctx context.Context, ch chan<- *v3.GetResponse) {
 
 	defer close(ch)
 	for {
-		resp, err := client.Get(ctx, e.keyPrefix, v3.WithFirstCreate()...)
+		resp, err := client.KV.Get(ctx, e.keyPrefix, v3.WithFirstCreate()...)
 		if err != nil {
 			return
 		}
@@ -187,7 +187,7 @@ func (e *Election) observe(ctx context.Context, ch chan<- *v3.GetResponse) {
 			cctx, cancel := context.WithCancel(ctx)
 			// wait for first key put on prefix
 			opts := []v3.OpOption{v3.WithRev(resp.Header.Revision), v3.WithPrefix()}
-			wch := client.Watch(cctx, e.keyPrefix, opts...)
+			wch := client.Watcher.Watch(cctx, e.keyPrefix, opts...)
 			for kv == nil {
 				wr, ok := <-wch
 				if !ok || wr.Err() != nil {
@@ -195,7 +195,10 @@ func (e *Election) observe(ctx context.Context, ch chan<- *v3.GetResponse) {
 					return
 				}
 				// only accept puts; a delete will make observe() spin
-				for _, ev := range wr.Events {
+				// Gooseable: mvccpb.Event rather than its alias v3.Event (the same type):
+				// Goose does not resolve a type alias when it selects a field through a pointer.
+				var events []*mvccpb.Event = wr.Events
+				for _, ev := range events {
 					if ev.Type == mvccpb.Event_PUT {
 						hdr, kv = wr.Header, ev.Kv
 						// may have multiple revs; hdr.rev = the last rev
@@ -217,7 +220,7 @@ func (e *Election) observe(ctx context.Context, ch chan<- *v3.GetResponse) {
 		}
 
 		cctx, cancel := context.WithCancel(ctx)
-		wch := client.Watch(cctx, string(kv.Key), v3.WithRev(hdr.Revision+1))
+		wch := client.Watcher.Watch(cctx, string(kv.Key), v3.WithRev(hdr.Revision+1))
 		keyDeleted := false
 		for !keyDeleted {
 			wr, ok := <-wch
@@ -225,7 +228,10 @@ func (e *Election) observe(ctx context.Context, ch chan<- *v3.GetResponse) {
 				cancel()
 				return
 			}
-			for _, ev := range wr.Events {
+			// Gooseable: mvccpb.Event rather than its alias v3.Event (the same type):
+			// Goose does not resolve a type alias when it selects a field through a pointer.
+			var events []*mvccpb.Event = wr.Events
+			for _, ev := range events {
 				if ev.Type == mvccpb.Event_DELETE {
 					keyDeleted = true
 					break

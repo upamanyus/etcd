@@ -62,7 +62,7 @@ func (m *Mutex) TryLock(ctx context.Context) error {
 	}
 	client := m.s.Client()
 	// Cannot lock, so delete the key
-	if _, err := client.Delete(ctx, m.myKey); err != nil {
+	if _, err := client.KV.Delete(ctx, m.myKey); err != nil {
 		return err
 	}
 	m.myKey = "\x00"
@@ -94,7 +94,7 @@ func (m *Mutex) Lock(ctx context.Context) error {
 	}
 
 	// make sure the session is not expired, and the owner key still exists.
-	gresp, werr := client.Get(ctx, m.myKey)
+	gresp, werr := client.KV.Get(ctx, m.myKey)
 	if werr != nil {
 		m.Unlock(client.Ctx())
 		return werr
@@ -120,7 +120,7 @@ func (m *Mutex) tryAcquire(ctx context.Context) (*v3.TxnResponse, error) {
 	get := v3.OpGet(m.myKey)
 	// fetch current holder to complete uncontended path with only one RPC
 	getOwner := v3.OpGet(m.pfx, v3.WithFirstCreate()...)
-	resp, err := client.Txn(ctx).If(cmp).Then(put, getOwner).Else(get, getOwner).Commit()
+	resp, err := client.KV.Txn(ctx).If(cmp).Then(put, getOwner).Else(get, getOwner).Commit()
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (m *Mutex) Unlock(ctx context.Context) error {
 	}
 
 	client := m.s.Client()
-	if _, err := client.Delete(ctx, m.myKey); err != nil {
+	if _, err := client.KV.Delete(ctx, m.myKey); err != nil {
 		return err
 	}
 	m.myKey = "\x00"

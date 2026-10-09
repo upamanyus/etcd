@@ -264,7 +264,7 @@ func (s *stm) Rev(key string) int64 {
 }
 
 func (s *stm) commit() *v3.TxnResponse {
-	txnresp, err := s.client.Txn(s.ctx).If(s.conflicts()...).Then(s.wset.puts()...).Commit()
+	txnresp, err := s.client.KV.Txn(s.ctx).If(s.conflicts()...).Then(s.wset.puts()...).Commit()
 	if err != nil {
 		panic(stmError{err})
 	}
@@ -285,7 +285,7 @@ func (s *stm) fetch(keys ...string) *v3.GetResponse {
 		}
 		ops[i] = v3.OpGet(key, s.getOpts...)
 	}
-	txnresp, err := s.client.Txn(s.ctx).Then(ops...).Commit()
+	txnresp, err := s.client.KV.Txn(s.ctx).Then(ops...).Commit()
 	if err != nil {
 		panic(stmError{err})
 	}
@@ -346,7 +346,7 @@ func (s *stmSerializable) gets() ([]string, []v3.Op) {
 
 func (s *stmSerializable) commit() *v3.TxnResponse {
 	keys, getops := s.gets()
-	txn := s.client.Txn(s.ctx).If(s.conflicts()...).Then(s.wset.puts()...)
+	txn := s.client.KV.Txn(s.ctx).If(s.conflicts()...).Then(s.wset.puts()...)
 	// use Else to prefetch keys in case of conflict to save a round trip
 	txnresp, err := txn.Else(getops...).Commit()
 	if err != nil {

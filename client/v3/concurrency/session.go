@@ -47,7 +47,7 @@ func NewSession(client *v3.Client, opts ...SessionOption) (*Session, error) {
 
 	id := ops.leaseID
 	if id == v3.NoLease {
-		resp, err := client.Grant(ops.ctx, int64(ops.ttl))
+		resp, err := client.Lease.Grant(ops.ctx, int64(ops.ttl))
 		if err != nil {
 			return nil, err
 		}
@@ -55,7 +55,7 @@ func NewSession(client *v3.Client, opts ...SessionOption) (*Session, error) {
 	}
 
 	ctx, cancel := context.WithCancel(ops.ctx)
-	keepAlive, err := client.KeepAlive(ctx, id)
+	keepAlive, err := client.Lease.KeepAlive(ctx, id)
 	if err != nil || keepAlive == nil {
 		cancel()
 		return nil, err
@@ -109,7 +109,7 @@ func (s *Session) Close() error {
 	s.Orphan()
 	// if revoke takes longer than the ttl, lease is expired anyway
 	ctx, cancel := context.WithTimeout(s.opts.ctx, time.Duration(s.opts.ttl)*time.Second)
-	_, err := s.client.Revoke(ctx, s.id)
+	_, err := s.client.Lease.Revoke(ctx, s.id)
 	cancel()
 	return err
 }

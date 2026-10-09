@@ -27,9 +27,12 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 	defer cancel()
 
 	var wr v3.WatchResponse
-	wch := client.Watch(cctx, key, v3.WithRev(rev))
+	wch := client.Watcher.Watch(cctx, key, v3.WithRev(rev))
 	for wr = range wch {
-		for _, ev := range wr.Events {
+		// Gooseable: mvccpb.Event rather than its alias v3.Event (the same type):
+		// Goose does not resolve a type alias when it selects a field through a pointer.
+		var events []*mvccpb.Event = wr.Events
+		for _, ev := range events {
 			if ev.Type == mvccpb.Event_DELETE {
 				return nil
 			}
@@ -49,7 +52,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 func waitDeletes(ctx context.Context, client *v3.Client, pfx string, maxCreateRev int64) error {
 	getOpts := append(v3.WithLastCreate(), v3.WithMaxCreateRev(maxCreateRev))
 	for {
-		resp, err := client.Get(ctx, pfx, getOpts...)
+		resp, err := client.KV.Get(ctx, pfx, getOpts...)
 		if err != nil {
 			return err
 		}
