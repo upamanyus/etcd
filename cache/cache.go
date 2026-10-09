@@ -346,14 +346,15 @@ func (c *Cache) get(ctx context.Context) (*clientv3.GetResponse, error) {
 }
 
 func (c *Cache) watch(rev int64) error {
+	// Init must run before storeW is registered: if it purges the demux, it
+	// stops every registered watcher, and must not stop this call's storeW.
+	c.demux.Init(rev)
 	readyOnce := sync.Once{}
 	for {
 		storeW := newWatcher(c.cfg.PerWatcherBufferSize, nil)
 		c.demux.Register(storeW, rev)
 		applyErr := make(chan error, 1)
-		c.waitGroup.Add(1)
 		go func() {
-			defer c.waitGroup.Done()
 			if err := c.applyStorage(storeW); err != nil {
 				applyErr <- err
 			}
@@ -362,6 +363,17 @@ func (c *Cache) watch(rev int64) error {
 
 		err := c.watchEvents(rev, applyErr, &readyOnce)
 		c.demux.Unregister(storeW)
+		// Wait for applyStorage to return, so that it does not write the
+		// store concurrently with the next iteration or the caller's next
+		// Restore: Unregister stopped storeW, so it returns once it has
+		// applied the responses storeW buffered. Its error, if watchEvents
+		// did not receive it, ends this watch. This wait also keeps Close
+		// from returning before applyStorage does, so the goroutine is not
+		// added to c.waitGroup.
+		applyStorageErr := <-applyErr
+		if err == nil {
+			err = applyStorageErr
+		}
 
 		if err != nil {
 			return err
@@ -386,8 +398,11 @@ func (c *Cache) applyStorage(storeW *watcher) error {
 }
 
 func (c *Cache) watchEvents(rev int64, applyErr <-chan error, readyOnce *sync.Once) error {
+	// Close the upstream watch on return; a retry opens a new one.
+	ctx, cancel := context.WithCancel(c.internalCtx)
+	defer cancel()
 	watchCh := c.watcher.Watch(
-		c.internalCtx,
+		ctx,
 		c.prefix,
 		clientv3.WithPrefix(),
 		clientv3.WithRev(rev),
@@ -402,10 +417,7 @@ func (c *Cache) watchEvents(rev int64, applyErr <-chan error, readyOnce *sync.On
 			if !ok {
 				return nil
 			}
-			readyOnce.Do(func() {
-				c.demux.Init(rev)
-				c.ready.Set()
-			})
+			readyOnce.Do(c.ready.Set)
 			if err := resp.Err(); err != nil {
 				c.ready.Reset()
 				return err
