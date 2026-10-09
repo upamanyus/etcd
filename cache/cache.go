@@ -389,11 +389,8 @@ func (c *Cache) applyStorage(storeW *watcher) error {
 }
 
 func (c *Cache) watchEvents(rev int64, applyErr <-chan error, readyOnce *sync.Once) error {
-	// Close the upstream watch on return; a retry opens a new one.
-	ctx, cancel := context.WithCancel(c.internalCtx)
-	defer cancel()
 	watchCh := c.watcher.Watch(
-		ctx,
+		c.internalCtx,
 		c.prefix,
 		clientv3.WithPrefix(),
 		clientv3.WithRev(rev),
