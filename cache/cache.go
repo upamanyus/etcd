@@ -354,7 +354,9 @@ func (c *Cache) watch(rev int64) error {
 		storeW := newWatcher(c.cfg.PerWatcherBufferSize, nil)
 		c.demux.Register(storeW, rev)
 		applyErr := make(chan error, 1)
+		c.waitGroup.Add(1)
 		go func() {
+			defer c.waitGroup.Done()
 			if err := c.applyStorage(storeW); err != nil {
 				applyErr <- err
 			}
@@ -363,17 +365,6 @@ func (c *Cache) watch(rev int64) error {
 
 		err := c.watchEvents(rev, applyErr, &readyOnce)
 		c.demux.Unregister(storeW)
-		// Wait for applyStorage to return, so that it does not write the
-		// store concurrently with the next iteration or the caller's next
-		// Restore: Unregister stopped storeW, so it returns once it has
-		// applied the responses storeW buffered. Its error, if watchEvents
-		// did not receive it, ends this watch. This wait also keeps Close
-		// from returning before applyStorage does, so the goroutine is not
-		// added to c.waitGroup.
-		applyStorageErr := <-applyErr
-		if err == nil {
-			err = applyStorageErr
-		}
 
 		if err != nil {
 			return err
