@@ -129,26 +129,22 @@ func (lc *leaseCache) Add(key string, resp *v3.GetResponse, op v3.Op) *v3.GetRes
 	return ret
 }
 
-func (lc *leaseCache) Update(key, val []byte, respHeader *v3pb.ResponseHeader) {
+// Update caches kvs, key's key-values read by a write of key at the
+// revision of respHeader, unless the cached key is as recent.
+func (lc *leaseCache) Update(key []byte, kvs []*mvccpb.KeyValue, respHeader *v3pb.ResponseHeader) {
 	li := lc.entries[string(key)]
-	if li == nil {
+	if li == nil || respHeader.Revision <= li.response.Header.Revision {
 		return
 	}
-	cacheResp := li.response
-	if len(cacheResp.Kvs) == 0 {
-		kv := &mvccpb.KeyValue{
-			Key:            key,
-			CreateRevision: respHeader.Revision,
-		}
-		cacheResp.Kvs = append(cacheResp.Kvs, kv)
-		cacheResp.Count = 1
+	if len(kvs) > 0 && kvs[0].Lease != 0 {
+		// etcd deletes the key when its lease ends, unseen by the cache
+		delete(lc.entries, string(key))
+		lc.revokes[string(key)] = time.Now()
+		return
 	}
-	cacheResp.Kvs[0].Version++
-	if cacheResp.Kvs[0].ModRevision < respHeader.Revision {
-		cacheResp.Header = respHeader
-		cacheResp.Kvs[0].ModRevision = respHeader.Revision
-		cacheResp.Kvs[0].Value = val
-	}
+	li.response.Kvs = kvs
+	li.response.Count = int64(len(kvs))
+	li.response.Header = copyHeader(respHeader)
 }
 
 func (lc *leaseCache) Delete(key string, hdr *v3pb.ResponseHeader) {

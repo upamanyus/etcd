@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	v3pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	v3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -156,8 +157,26 @@ func (txn *txnLeasing) guard(ops []v3.Op) ([]v3.Cmp, error) {
 	return append(cmps, rangeCmps...), err
 }
 
-func (txn *txnLeasing) commitToCache(txnResp *v3pb.TxnResponse, userTxn v3.Op) {
-	ops := gatherResponseOps(txnResp.Responses, []v3.Op{userTxn})
+// putReads returns a read of every key put by ops, for the cache.
+func putReads(ops []v3.Op) (reads []v3.Op) {
+	seen := make(map[string]bool)
+	for _, op := range ops {
+		if key := string(op.KeyBytes()); op.IsPut() && !seen[key] {
+			reads = append(reads, v3.OpGet(key))
+			seen[key] = true
+		}
+	}
+	return reads
+}
+
+// commitToCache applies to the cache the response of userTxn followed by
+// reads (putReads).
+func (txn *txnLeasing) commitToCache(txnResp *v3pb.TxnResponse, userTxn v3.Op, reads []v3.Op) {
+	kvs := make(map[string][]*mvccpb.KeyValue)
+	for i, read := range reads {
+		kvs[string(read.KeyBytes())] = txnResp.Responses[1+i].GetResponseRange().Kvs
+	}
+	ops := gatherResponseOps(txnResp.Responses[:1], []v3.Op{userTxn})
 	txn.lkv.leases.mu.Lock()
 	for _, op := range ops {
 		key := string(op.KeyBytes())
@@ -172,7 +191,7 @@ func (txn *txnLeasing) commitToCache(txnResp *v3pb.TxnResponse, userTxn v3.Op) {
 			txn.lkv.leases.delete(key, txnResp.Header)
 		}
 		if op.IsPut() {
-			txn.lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), txnResp.Header)
+			txn.lkv.leases.Update(op.KeyBytes(), kvs[key], txnResp.Header)
 		}
 	}
 	txn.lkv.leases.mu.Unlock()
@@ -195,6 +214,7 @@ func (txn *txnLeasing) serverTxn() (*v3.TxnResponse, error) {
 
 	userOps := gatherOps(append(txn.opst, txn.opse...))
 	userTxn := v3.OpTxn(txn.cs, txn.opst, txn.opse)
+	reads := putReads(userOps)
 	fbOps := txn.fallback(userOps)
 
 	defer closeAll(txn.lkv.leases.LockWriteOps(userOps))
@@ -203,7 +223,7 @@ func (txn *txnLeasing) serverTxn() (*v3.TxnResponse, error) {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := txn.lkv.kv.Txn(txn.ctx).If(cmps...).Then(userTxn).Else(fbOps...).Commit()
+		resp, err := txn.lkv.kv.Txn(txn.ctx).If(cmps...).Then(append([]v3.Op{userTxn}, reads...)...).Else(fbOps...).Commit()
 		if err != nil {
 			for _, cmp := range cmps {
 				txn.lkv.leases.Evict(strings.TrimPrefix(string(cmp.KeyBytes()), txn.lkv.pfx))
@@ -211,7 +231,7 @@ func (txn *txnLeasing) serverTxn() (*v3.TxnResponse, error) {
 			return nil, err
 		}
 		if resp.Succeeded {
-			txn.commitToCache((*v3pb.TxnResponse)(resp), userTxn)
+			txn.commitToCache((*v3pb.TxnResponse)(resp), userTxn, reads)
 			userResp := resp.Responses[0].GetResponseTxn()
 			userResp.Header = resp.Header
 			return (*v3.TxnResponse)(userResp), nil

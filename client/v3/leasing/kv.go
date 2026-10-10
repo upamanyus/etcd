@@ -215,11 +215,13 @@ func (lkv *leasingKV) waitRescind(ctx context.Context, key string, rev int64) er
 	return ctx.Err()
 }
 
-func (lkv *leasingKV) tryModifyOp(ctx context.Context, op v3.Op) (*v3.TxnResponse, chan<- struct{}, error) {
+// tryModifyOp commits op, followed by the ops in after, if no other client
+// holds the lease on op's key.
+func (lkv *leasingKV) tryModifyOp(ctx context.Context, op v3.Op, after ...v3.Op) (*v3.TxnResponse, chan<- struct{}, error) {
 	key := string(op.KeyBytes())
 	wc, rev := lkv.leases.Lock(key)
 	cmp := v3.Compare(v3.CreateRevision(lkv.pfx+key), "<", rev+1)
-	resp, err := lkv.kv.Txn(ctx).If(cmp).Then(op).Commit()
+	resp, err := lkv.kv.Txn(ctx).If(cmp).Then(append([]v3.Op{op}, after...)...).Commit()
 	switch {
 	case err != nil:
 		lkv.leases.Evict(key)
@@ -237,17 +239,19 @@ func (lkv *leasingKV) put(ctx context.Context, op v3.Op) (pr *v3.PutResponse, er
 	if err := lkv.waitSession(ctx); err != nil {
 		return nil, err
 	}
+	// read the key as the put leaves it, for the cache
+	get := v3.OpGet(string(op.KeyBytes()))
 	for ctx.Err() == nil {
-		resp, wc, err := lkv.tryModifyOp(ctx, op)
+		resp, wc, err := lkv.tryModifyOp(ctx, op, get)
 		if err != nil || wc == nil {
-			resp, err = lkv.revoke(ctx, string(op.KeyBytes()), op)
+			resp, err = lkv.revoke(ctx, string(op.KeyBytes()), op, get)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if resp.Succeeded {
 			lkv.leases.mu.Lock()
-			lkv.leases.Update(op.KeyBytes(), op.ValueBytes(), resp.Header)
+			lkv.leases.Update(op.KeyBytes(), resp.Responses[1].GetResponseRange().Kvs, resp.Header)
 			lkv.leases.mu.Unlock()
 			pr = (*v3.PutResponse)(resp.Responses[0].GetResponsePut())
 			pr.Header = resp.Header
@@ -281,8 +285,10 @@ func (lkv *leasingKV) acquire(ctx context.Context, key string, op v3.Op) (*v3.Tx
 		if err == nil {
 			if !resp.Succeeded {
 				kvs := resp.Responses[1].GetResponseRange().Kvs
-				// if txn failed since already owner, lease is acquired
-				resp.Succeeded = len(kvs) > 0 && v3.LeaseID(kvs[0].Lease) == lkv.leaseID()
+				// if txn failed since already owner, lease is acquired,
+				// unless the key has a lease (put WithLease since)
+				resp.Succeeded = len(kvs) > 0 && v3.LeaseID(kvs[0].Lease) == lkv.leaseID() &&
+					keyHasNoLease(resp.Responses[0].GetResponseRange().Kvs)
 			}
 			return resp, nil
 		}
@@ -296,6 +302,10 @@ func (lkv *leasingKV) acquire(ctx context.Context, key string, op v3.Op) (*v3.Tx
 		}
 	}
 	return nil, ctx.Err()
+}
+
+func keyHasNoLease(kvs []*mvccpb.KeyValue) bool {
+	return len(kvs) == 0 || kvs[0].Lease == 0
 }
 
 func (lkv *leasingKV) get(ctx context.Context, op v3.Op) (*v3.GetResponse, error) {
@@ -410,9 +420,11 @@ func (lkv *leasingKV) delete(ctx context.Context, op v3.Op) (dr *v3.DeleteRespon
 	return nil, ctx.Err()
 }
 
-func (lkv *leasingKV) revoke(ctx context.Context, key string, op v3.Op) (*v3.TxnResponse, error) {
+// revoke commits op, followed by the ops in after, once no other client holds
+// the lease on key.
+func (lkv *leasingKV) revoke(ctx context.Context, key string, op v3.Op, after ...v3.Op) (*v3.TxnResponse, error) {
 	rev := lkv.leases.Rev(key)
-	txn := lkv.kv.Txn(ctx).If(v3.Compare(v3.CreateRevision(lkv.pfx+key), "<", rev+1)).Then(op)
+	txn := lkv.kv.Txn(ctx).If(v3.Compare(v3.CreateRevision(lkv.pfx+key), "<", rev+1)).Then(append([]v3.Op{op}, after...)...)
 	resp, err := txn.Else(v3.OpPut(lkv.pfx+key, "REVOKE", v3.WithIgnoreLease())).Commit()
 	if err != nil || resp.Succeeded {
 		return resp, err
