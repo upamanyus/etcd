@@ -377,11 +377,15 @@ func TestElectionWithAuthEnabled(t *testing.T) {
 		c         *clientv3.Client
 		pfx       string
 		sleepTime time.Duration // time to sleep before campaigning
+		// orphan stops the session's keepalive, so that the leader's key
+		// expires and the next campaign on the prefix is elected.
+		orphan bool
 	}{
 		{
-			name: "client1 first campaign",
-			c:    c1,
-			pfx:  "/foo1/a",
+			name:   "client1 first campaign",
+			c:      c1,
+			pfx:    "/foo1/a",
+			orphan: true,
 		},
 		{
 			name: "client1 second campaign",
@@ -393,6 +397,7 @@ func TestElectionWithAuthEnabled(t *testing.T) {
 			c:         c2,
 			pfx:       "/bar1/b",
 			sleepTime: 5 * time.Second,
+			orphan:    true,
 		},
 		{
 			name:      "client2 second campaign",
@@ -419,7 +424,11 @@ func TestElectionWithAuthEnabled(t *testing.T) {
 			if serr != nil {
 				errC <- fmt.Errorf("[NewSession] %s: %w", campaign.name, serr)
 			}
-			s.Orphan()
+			if campaign.orphan {
+				s.Orphan()
+			} else {
+				defer s.Close()
+			}
 
 			e := concurrency.NewElection(s, campaign.pfx)
 			eerr := e.Campaign(t.Context(), "whatever")

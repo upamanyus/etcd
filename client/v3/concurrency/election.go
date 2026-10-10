@@ -90,20 +90,49 @@ func (e *Election) Campaign(ctx context.Context, val string) error {
 		}
 	}
 
-	err = waitDeletes(ctx, client, e.keyPrefix, e.leaderRev-1)
-	if err != nil {
-		// clean up in case of context cancel
-		select {
-		case <-ctx.Done():
-			e.Resign(client.Ctx())
-		default:
-			e.leaderSession = nil
+	for {
+		err = waitDeletes(ctx, client, e.keyPrefix, e.leaderRev-1)
+		if err != nil {
+			e.abortCampaign(ctx)
+			return err
 		}
-		return err
-	}
-	e.hdr = resp.Header
 
-	return nil
+		// make sure the session is not expired, and the leader key still exists.
+		gresp, gerr := client.Get(ctx, e.leaderKey)
+		if gerr != nil {
+			e.abortCampaign(ctx)
+			return gerr
+		}
+		if len(gresp.Kvs) == 0 {
+			// The key was deleted while waiting (e.g. the lease expired or was
+			// revoked, or another Election on the same session and prefix
+			// resigned), so this campaign is no longer in the election.
+			e.leaderKey = ""
+			e.leaderSession = nil
+			return ErrElectionNotLeader
+		}
+		if gresp.Kvs[0].CreateRevision == e.leaderRev {
+			e.hdr = gresp.Header
+			return nil
+		}
+		// The key was deleted and recreated under this session (e.g. by another
+		// Election on the same session and prefix) since it was created or found
+		// above, so keys of other sessions may now have been created before it:
+		// wait for those as well.
+		e.leaderRev = gresp.Kvs[0].CreateRevision
+	}
+}
+
+// abortCampaign cleans up after Campaign failed while waiting to be elected.
+func (e *Election) abortCampaign(ctx context.Context) {
+	client := e.session.Client()
+	// clean up in case of context cancel
+	select {
+	case <-ctx.Done():
+		e.Resign(client.Ctx())
+	default:
+		e.leaderSession = nil
+	}
 }
 
 // Proclaim lets the leader announce a new value without another election.
