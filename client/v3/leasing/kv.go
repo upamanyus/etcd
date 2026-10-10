@@ -174,6 +174,11 @@ func (lkv *leasingKV) monitorLease(ctx context.Context, key string, rev int64) {
 		wch := lkv.cl.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
 		for resp := range wch {
 			for _, ev := range resp.Events {
+				if ev.Type == v3.EventTypeDelete {
+					// the leasing key's lease ended (expired or revoked)
+					lkv.rescind(cctx, key, ev.Kv.ModRevision)
+					return
+				}
 				if string(ev.Kv.Value) != "REVOKE" {
 					continue
 				}
