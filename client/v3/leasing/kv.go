@@ -201,18 +201,35 @@ func (lkv *leasingKV) rescind(ctx context.Context, key string, rev int64) {
 	}
 }
 
+// waitRescind waits until the leasing key revoked at revision rev is deleted.
 func (lkv *leasingKV) waitRescind(ctx context.Context, key string, rev int64) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	wch := lkv.cl.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
-	for resp := range wch {
-		for _, ev := range resp.Events {
-			if ev.Type == v3.EventTypeDelete {
-				return ctx.Err()
+	watchRev := rev
+	for {
+		wch := lkv.cl.Watch(cctx, lkv.pfx+key, v3.WithRev(watchRev+1))
+		for resp := range wch {
+			for _, ev := range resp.Events {
+				if ev.Type == v3.EventTypeDelete {
+					return ctx.Err()
+				}
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// The watch ended without the delete (its start revision was
+		// compacted, or the client is closing): check the leasing key.
+		resp, err := lkv.kv.Get(ctx, lkv.pfx+key)
+		if err != nil {
+			return err
+		}
+		if len(resp.Kvs) == 0 || resp.Kvs[0].CreateRevision > rev {
+			// deleted (and possibly acquired again since)
+			return nil
+		}
+		watchRev = resp.Header.Revision
 	}
-	return ctx.Err()
 }
 
 func (lkv *leasingKV) tryModifyOp(ctx context.Context, op v3.Op) (*v3.TxnResponse, chan<- struct{}, error) {
