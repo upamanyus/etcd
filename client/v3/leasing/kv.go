@@ -171,9 +171,12 @@ func (lkv *leasingKV) monitorLease(ctx context.Context, key string, rev int64) {
 				return
 			}
 		}
-		wch := lkv.cl.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
+		wch := lkv.cl.Watcher.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
 		for resp := range wch {
-			for _, ev := range resp.Events {
+			// Gooseable: mvccpb.Event rather than its alias v3.Event (the same type):
+			// Goose does not resolve a type alias when it selects a field through a pointer.
+			var events []*mvccpb.Event = resp.Events
+			for _, ev := range events {
 				if string(ev.Kv.Value) != "REVOKE" {
 					continue
 				}
@@ -204,9 +207,12 @@ func (lkv *leasingKV) rescind(ctx context.Context, key string, rev int64) {
 func (lkv *leasingKV) waitRescind(ctx context.Context, key string, rev int64) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	wch := lkv.cl.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
+	wch := lkv.cl.Watcher.Watch(cctx, lkv.pfx+key, v3.WithRev(rev+1))
 	for resp := range wch {
-		for _, ev := range resp.Events {
+		// Gooseable: mvccpb.Event rather than its alias v3.Event (the same type):
+		// Goose does not resolve a type alias when it selects a field through a pointer.
+		var events []*mvccpb.Event = resp.Events
+		for _, ev := range events {
 			if ev.Type == v3.EventTypeDelete {
 				return ctx.Err()
 			}
