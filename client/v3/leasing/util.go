@@ -35,26 +35,35 @@ func compareInt64(a, b int64) int {
 
 func evalCmp(resp *v3.GetResponse, tcmp v3.Cmp) bool {
 	var result int
+	cmp := tcmp.GetCompare()
+	// As etcd does (applyCompare in server/etcdserver/txn), compare a missing
+	// key as the zero KeyValue, except that comparing its value always fails.
+	kv := &mvccpb.KeyValue{}
 	if len(resp.Kvs) != 0 {
-		kv := resp.Kvs[0]
-		cmp := tcmp.GetCompare()
-		switch cmp.GetTarget() {
-		case v3pb.Compare_VALUE:
-			if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_Value); tv != nil {
-				result = bytes.Compare(kv.Value, tv.Value)
-			}
-		case v3pb.Compare_CREATE:
-			if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_CreateRevision); tv != nil {
-				result = compareInt64(kv.CreateRevision, tv.CreateRevision)
-			}
-		case v3pb.Compare_MOD:
-			if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_ModRevision); tv != nil {
-				result = compareInt64(kv.ModRevision, tv.ModRevision)
-			}
-		case v3pb.Compare_VERSION:
-			if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_Version); tv != nil {
-				result = compareInt64(kv.Version, tv.Version)
-			}
+		kv = resp.Kvs[0]
+	} else if cmp.GetTarget() == v3pb.Compare_VALUE {
+		return false
+	}
+	switch cmp.GetTarget() {
+	case v3pb.Compare_VALUE:
+		if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_Value); tv != nil {
+			result = bytes.Compare(kv.Value, tv.Value)
+		}
+	case v3pb.Compare_CREATE:
+		if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_CreateRevision); tv != nil {
+			result = compareInt64(kv.CreateRevision, tv.CreateRevision)
+		}
+	case v3pb.Compare_MOD:
+		if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_ModRevision); tv != nil {
+			result = compareInt64(kv.ModRevision, tv.ModRevision)
+		}
+	case v3pb.Compare_VERSION:
+		if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_Version); tv != nil {
+			result = compareInt64(kv.Version, tv.Version)
+		}
+	case v3pb.Compare_LEASE:
+		if tv, _ := cmp.GetTargetUnion().(*v3pb.Compare_Lease); tv != nil {
+			result = compareInt64(kv.Lease, tv.Lease)
 		}
 	}
 	switch tcmp.GetCompare().GetResult() {

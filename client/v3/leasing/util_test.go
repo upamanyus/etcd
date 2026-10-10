@@ -155,6 +155,73 @@ func TestCopyKeyValue(t *testing.T) {
 	})
 }
 
+// TestEvalCmp checks evalCmp against how etcd evaluates a comparison on a
+// single key (applyCompare and compareKV in server/etcdserver/txn/txn.go):
+// a missing key compares as the zero KeyValue, except that a value
+// comparison on a missing key fails.
+func TestEvalCmp(t *testing.T) {
+	missing := &v3.GetResponse{Header: &v3pb.ResponseHeader{Revision: 10}}
+	present := &v3.GetResponse{
+		Header: &v3pb.ResponseHeader{Revision: 10},
+		Kvs: []*mvccpb.KeyValue{{
+			Key:            []byte("k"),
+			Value:          []byte("abc"),
+			CreateRevision: 5,
+			ModRevision:    8,
+			Version:        3,
+			Lease:          7,
+		}},
+		Count: 1,
+	}
+
+	tests := []struct {
+		name string
+		resp *v3.GetResponse
+		cmp  v3.Cmp
+		want bool
+	}{
+		// missing key: revisions, version and lease are 0
+		{"missing create <", missing, v3.Compare(v3.CreateRevision("k"), "<", 5), true},
+		{"missing create =0", missing, v3.Compare(v3.CreateRevision("k"), "=", 0), true},
+		{"missing create =", missing, v3.Compare(v3.CreateRevision("k"), "=", 5), false},
+		{"missing create !=", missing, v3.Compare(v3.CreateRevision("k"), "!=", 5), true},
+		{"missing create >", missing, v3.Compare(v3.CreateRevision("k"), ">", 0), false},
+		{"missing mod <", missing, v3.Compare(v3.ModRevision("k"), "<", 1), true},
+		{"missing mod =", missing, v3.Compare(v3.ModRevision("k"), "=", 1), false},
+		{"missing version =", missing, v3.Compare(v3.Version("k"), "=", 3), false},
+		{"missing version =0", missing, v3.Compare(v3.Version("k"), "=", 0), true},
+		{"missing version <", missing, v3.Compare(v3.Version("k"), "<", 1), true},
+		{"missing lease =", missing, v3.Compare(v3.LeaseValue("k"), "=", 7), false},
+		{"missing lease =0", missing, v3.Compare(v3.LeaseValue("k"), "=", 0), true},
+		// missing key: a value comparison always fails
+		{"missing value = empty", missing, v3.Compare(v3.Value("k"), "=", ""), false},
+		{"missing value !=", missing, v3.Compare(v3.Value("k"), "!=", "abc"), false},
+		{"missing value <", missing, v3.Compare(v3.Value("k"), "<", "abc"), false},
+		{"missing value >", missing, v3.Compare(v3.Value("k"), ">", ""), false},
+		// present key
+		{"present value =", present, v3.Compare(v3.Value("k"), "=", "abc"), true},
+		{"present value !=", present, v3.Compare(v3.Value("k"), "!=", "abc"), false},
+		{"present value <", present, v3.Compare(v3.Value("k"), "<", "abd"), true},
+		{"present value >", present, v3.Compare(v3.Value("k"), ">", "abc"), false},
+		{"present create =", present, v3.Compare(v3.CreateRevision("k"), "=", 5), true},
+		{"present create <", present, v3.Compare(v3.CreateRevision("k"), "<", 5), false},
+		{"present mod >", present, v3.Compare(v3.ModRevision("k"), ">", 5), true},
+		{"present mod =", present, v3.Compare(v3.ModRevision("k"), "=", 5), false},
+		{"present version =", present, v3.Compare(v3.Version("k"), "=", 3), true},
+		{"present version !=", present, v3.Compare(v3.Version("k"), "!=", 3), false},
+		{"present lease =", present, v3.Compare(v3.LeaseValue("k"), "=", 7), true},
+		{"present lease = other", present, v3.Compare(v3.LeaseValue("k"), "=", 8), false},
+		{"present lease !=", present, v3.Compare(v3.LeaseValue("k"), "!=", 7), false},
+		{"present lease >", present, v3.Compare(v3.LeaseValue("k"), ">", 6), true},
+		{"present lease <", present, v3.Compare(v3.LeaseValue("k"), "<", 7), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, evalCmp(tt.resp, tt.cmp))
+		})
+	}
+}
+
 func countProtobufFields(v any) int {
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Pointer {
