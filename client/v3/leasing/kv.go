@@ -262,6 +262,9 @@ func (lkv *leasingKV) put(ctx context.Context, op v3.Op) (pr *v3.PutResponse, er
 	return nil, ctx.Err()
 }
 
+// acquire tries to acquire the lease on key. Responses[0] is a plain get of
+// key, which is cached if the lease is acquired. If it is not, the Else branch
+// ran and Responses[2] is the response to op, the caller's get.
 func (lkv *leasingKV) acquire(ctx context.Context, key string, op v3.Op) (*v3.TxnResponse, error) {
 	for ctx.Err() == nil {
 		if err := lkv.waitSession(ctx); err != nil {
@@ -272,11 +275,12 @@ func (lkv *leasingKV) acquire(ctx context.Context, key string, op v3.Op) (*v3.Tx
 			v3.Compare(v3.CreateRevision(lkv.pfx+key), "=", 0),
 			v3.Compare(lcmp, "=", 0)).
 			Then(
-				op,
+				v3.OpGet(key),
 				v3.OpPut(lkv.pfx+key, "", v3.WithLease(lkv.leaseID()))).
 			Else(
-				op,
+				v3.OpGet(key),
 				v3.OpGet(lkv.pfx+key),
+				op,
 			).Commit()
 		if err == nil {
 			if !resp.Succeeded {
@@ -320,11 +324,15 @@ func (lkv *leasingKV) get(ctx context.Context, op v3.Op) (*v3.GetResponse, error
 		return resp.Get(), err
 	}
 
-	resp, err := lkv.acquire(ctx, key, v3.OpGet(key))
+	resp, err := lkv.acquire(ctx, key, op)
 	if err != nil {
 		return nil, err
 	}
 	getResp := (*v3.GetResponse)(resp.Responses[0].GetResponseRange())
+	if !resp.Succeeded {
+		// not acquired: answer with op's response, not the plain get's
+		getResp = (*v3.GetResponse)(resp.Responses[2].GetResponseRange())
+	}
 	getResp.Header = resp.Header
 	if resp.Succeeded {
 		getResp = lkv.leases.Add(key, getResp, op)
