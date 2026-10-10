@@ -21,12 +21,16 @@ import (
 	"math/rand"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -1036,6 +1040,69 @@ func testLeasingOwnerDelete(t *testing.T, del clientv3.Op) {
 
 	wresp := <-w
 	require.Lenf(t, wresp.Events, 8, "expected %d delete events,got %d", 8, len(wresp.Events))
+}
+
+// TestLeasingOwnerDeleteRangeLostResponse checks that a range delete whose
+// response is lost after etcd applied it evicts every cached key in the range,
+// so later Gets do not serve keys etcd has deleted.
+func TestLeasingOwnerDeleteRangeLostResponse(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	// loseDeleteResponse makes the next Txn that deletes a range fail with
+	// Unavailable after etcd has applied it, as when the connection drops
+	// before the response arrives. Unavailable is not retried for a Txn.
+	var loseDeleteResponse atomic.Bool
+	interceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if txn, ok := req.(*pb.TxnRequest); ok && err == nil && deletesRange(txn) && loseDeleteResponse.CompareAndSwap(true, false) {
+			return status.Error(codes.Unavailable, "injected: response lost")
+		}
+		return err
+	}
+	cli, err := integration.NewClient(t, clientv3.Config{
+		Endpoints:   clus.Client(0).Endpoints(),
+		DialOptions: []grpc.DialOption{grpc.WithChainUnaryInterceptor(interceptor)},
+	})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	lkv, closeLKV, err := leasing.NewKV(cli, "pfx/")
+	require.NoError(t, err)
+	defer closeLKV()
+
+	for _, k := range []string{"a", "b"} {
+		_, err = clus.Client(0).Put(t.Context(), k, "v")
+		require.NoError(t, err)
+		// cache k
+		_, err = lkv.Get(t.Context(), k)
+		require.NoError(t, err)
+	}
+
+	loseDeleteResponse.Store(true)
+	_, err = lkv.Delete(t.Context(), "a", clientv3.WithRange("c"))
+	require.Error(t, err)
+	require.Falsef(t, loseDeleteResponse.Load(), "expected the range delete to reach etcd")
+
+	for _, k := range []string{"a", "b"} {
+		resp, err := clus.Client(0).Get(t.Context(), k)
+		require.NoError(t, err)
+		require.Emptyf(t, resp.Kvs, "expected %q deleted on etcd, got %+v", k, resp.Kvs)
+
+		resp, err = lkv.Get(t.Context(), k)
+		require.NoError(t, err)
+		require.Emptyf(t, resp.Kvs, "expected the leasing KV not to return %q, deleted on etcd, got %+v", k, resp.Kvs)
+	}
+}
+
+func deletesRange(txn *pb.TxnRequest) bool {
+	for _, op := range txn.Success {
+		if del := op.GetRequestDeleteRange(); del != nil && len(del.RangeEnd) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLeasingDeleteRangeBounds(t *testing.T) {
