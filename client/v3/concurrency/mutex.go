@@ -84,28 +84,35 @@ func (m *Mutex) Lock(ctx context.Context) error {
 		return nil
 	}
 	client := m.s.Client()
-	// wait for deletion revisions prior to myKey
-	// TODO: early termination if the session key is deleted before other session keys with smaller revisions.
-	werr := waitDeletes(ctx, client, m.pfx, m.myRev-1)
-	// release lock key if wait failed
-	if werr != nil {
-		m.Unlock(client.Ctx())
-		return werr
-	}
+	for {
+		// wait for deletion revisions prior to myKey
+		// TODO: early termination if the session key is deleted before other session keys with smaller revisions.
+		werr := waitDeletes(ctx, client, m.pfx, m.myRev-1)
+		// release lock key if wait failed
+		if werr != nil {
+			m.Unlock(client.Ctx())
+			return werr
+		}
 
-	// make sure the session is not expired, and the owner key still exists.
-	gresp, werr := client.Get(ctx, m.myKey)
-	if werr != nil {
-		m.Unlock(client.Ctx())
-		return werr
-	}
+		// make sure the session is not expired, and the owner key still exists.
+		gresp, werr := client.Get(ctx, m.myKey)
+		if werr != nil {
+			m.Unlock(client.Ctx())
+			return werr
+		}
 
-	if len(gresp.Kvs) == 0 { // is the session key lost?
-		return ErrSessionExpired
+		if len(gresp.Kvs) == 0 { // is the session key lost?
+			return ErrSessionExpired
+		}
+		if gresp.Kvs[0].CreateRevision == m.myRev {
+			m.hdr = gresp.Header
+			return nil
+		}
+		// The key was deleted and recreated under this session (e.g. by another
+		// Mutex on the same session and prefix) since tryAcquire, so keys of other
+		// sessions may now have been created before it: wait for those as well.
+		m.myRev = gresp.Kvs[0].CreateRevision
 	}
-	m.hdr = gresp.Header
-
-	return nil
 }
 
 func (m *Mutex) tryAcquire(ctx context.Context) (*v3.TxnResponse, error) {
