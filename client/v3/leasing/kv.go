@@ -239,7 +239,7 @@ func (lkv *leasingKV) put(ctx context.Context, op v3.Op) (pr *v3.PutResponse, er
 	}
 	for ctx.Err() == nil {
 		resp, wc, err := lkv.tryModifyOp(ctx, op)
-		if err != nil || wc == nil {
+		if err != nil || resp == nil {
 			resp, err = lkv.revoke(ctx, string(op.KeyBytes()), op)
 		}
 		if err != nil {
@@ -387,7 +387,7 @@ func (lkv *leasingKV) delete(ctx context.Context, op v3.Op) (dr *v3.DeleteRespon
 	key := string(op.KeyBytes())
 	for ctx.Err() == nil {
 		resp, wc, err := lkv.tryModifyOp(ctx, op)
-		if err != nil || wc == nil {
+		if err != nil || resp == nil {
 			resp, err = lkv.revoke(ctx, key, op)
 		}
 		if err != nil {

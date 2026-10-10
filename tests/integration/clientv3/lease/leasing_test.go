@@ -441,6 +441,66 @@ func TestLeasingDeleteNonOwner(t *testing.T) {
 	require.Emptyf(t, resp.Kvs, `expected "k" to be deleted, got response %+v`, resp)
 }
 
+// TestLeasingPutUncachedOnce checks that a Put through the leasing KV of a key
+// it has not cached is applied once.
+func TestLeasingPutUncachedOnce(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	lkv, closeLKV, err := leasing.NewKV(clus.Client(0), "pfx/")
+	require.NoError(t, err)
+	defer closeLKV()
+
+	presp, err := lkv.Put(t.Context(), "k", "abc", clientv3.WithPrevKV())
+	require.NoError(t, err)
+	assert.Nilf(t, presp.PrevKv, "put of a fresh key returned a previous key-value")
+
+	gresp, err := clus.Client(0).Get(t.Context(), "k")
+	require.NoError(t, err)
+	require.Len(t, gresp.Kvs, 1)
+	assert.Equalf(t, int64(1), gresp.Kvs[0].Version, "version after one put")
+	assert.Equalf(t, gresp.Kvs[0].CreateRevision, gresp.Kvs[0].ModRevision, "mod revision after one put")
+	assert.Equalf(t, presp.Header.Revision, gresp.Kvs[0].ModRevision, "mod revision of the put")
+
+	presp, err = lkv.Put(t.Context(), "k", "def", clientv3.WithPrevKV())
+	require.NoError(t, err)
+	require.NotNil(t, presp.PrevKv)
+	assert.Equalf(t, "abc", string(presp.PrevKv.Value), "previous value of the second put")
+	assert.Equalf(t, int64(1), presp.PrevKv.Version, "previous version of the second put")
+
+	gresp, err = clus.Client(0).Get(t.Context(), "k")
+	require.NoError(t, err)
+	require.Len(t, gresp.Kvs, 1)
+	assert.Equalf(t, int64(2), gresp.Kvs[0].Version, "version after two puts")
+}
+
+// TestLeasingDeleteUncachedOnce checks that a Delete through the leasing KV of
+// a key it has not cached is applied once and reports the deleted key.
+func TestLeasingDeleteUncachedOnce(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	lkv, closeLKV, err := leasing.NewKV(clus.Client(0), "pfx/")
+	require.NoError(t, err)
+	defer closeLKV()
+
+	_, err = clus.Client(0).Put(t.Context(), "k", "abc")
+	require.NoError(t, err)
+
+	dresp, err := lkv.Delete(t.Context(), "k", clientv3.WithPrevKV())
+	require.NoError(t, err)
+	assert.Equalf(t, int64(1), dresp.Deleted, "number of keys deleted")
+	if assert.Lenf(t, dresp.PrevKvs, 1, "previous key-values of the delete") {
+		assert.Equal(t, "abc", string(dresp.PrevKvs[0].Value))
+	}
+
+	gresp, err := clus.Client(0).Get(t.Context(), "k")
+	require.NoError(t, err)
+	assert.Empty(t, gresp.Kvs)
+}
+
 func TestLeasingOverwriteResponse(t *testing.T) {
 	integration.BeforeTest(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
