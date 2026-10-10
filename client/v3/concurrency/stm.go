@@ -319,8 +319,9 @@ func (s *stmSerializable) Get(keys ...string) string {
 		}
 	}
 	resp := s.stm.fetch(keys...)
-	if firstRead {
-		// txn's base revision is defined by the first read
+	if firstRead && len(s.getOpts) == 0 {
+		// txn's base revision is defined by the first read, unless a failed
+		// commit set it to the revision of the prefetched reads
 		s.getOpts = []v3.OpOption{
 			v3.WithRev(resp.Header.Revision),
 			v3.WithSerializable(),
@@ -358,7 +359,12 @@ func (s *stmSerializable) commit() *v3.TxnResponse {
 	// load prefetch with Else data
 	s.rset.add(keys, txnresp)
 	s.prefetch = s.rset
-	s.getOpts = nil
+	// the next attempt reads at the revision of the prefetched data, so that
+	// its reads, prefetched or not, come from one revision
+	s.getOpts = []v3.OpOption{
+		v3.WithRev(txnresp.Header.Revision),
+		v3.WithSerializable(),
+	}
 	return nil
 }
 
