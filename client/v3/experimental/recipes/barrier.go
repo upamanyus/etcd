@@ -36,20 +36,20 @@ func NewBarrier(client *v3.Client, key string) *Barrier {
 
 // Hold creates the barrier key causing processes to block on Wait.
 func (b *Barrier) Hold() error {
-	_, err := newKey(b.client, b.key, v3.NoLease)
+	_, err := newKey(b.client.KV, b.key, v3.NoLease)
 	return err
 }
 
 // Release deletes the barrier key to unblock all waiting processes.
 func (b *Barrier) Release() error {
-	_, err := b.client.Delete(b.ctx, b.key)
+	_, err := b.client.KV.Delete(b.ctx, b.key)
 	return err
 }
 
 // Wait blocks on the barrier key until it is deleted. If there is no key, Wait
 // assumes Release has already been called and returns immediately.
 func (b *Barrier) Wait() error {
-	resp, err := b.client.Get(b.ctx, b.key)
+	resp, err := b.client.KV.Get(b.ctx, b.key)
 	if err != nil {
 		return err
 	}

@@ -37,7 +37,7 @@ func NewPriorityQueue(client *v3.Client, key string) *PriorityQueue {
 // Enqueue puts a value into a queue with a given priority.
 func (q *PriorityQueue) Enqueue(val string, pr uint16) error {
 	prefix := fmt.Sprintf("%s%05d", q.key, pr)
-	_, err := newSequentialKV(q.client, prefix, val)
+	_, err := newSequentialKV(q.client.KV, prefix, val)
 	return err
 }
 
@@ -45,12 +45,12 @@ func (q *PriorityQueue) Enqueue(val string, pr uint16) error {
 // queue is empty, Dequeue blocks until items are available.
 func (q *PriorityQueue) Dequeue() (string, error) {
 	// TODO: fewer round trips by fetching more than one key
-	resp, err := q.client.Get(q.ctx, q.key, v3.WithFirstKey()...)
+	resp, err := q.client.KV.Get(q.ctx, q.key, v3.WithFirstKey()...)
 	if err != nil {
 		return "", err
 	}
 
-	kv, err := claimFirstKey(q.client, resp.Kvs)
+	kv, err := claimFirstKey(q.client.KV, resp.Kvs)
 	if err != nil {
 		return "", err
 	} else if kv != nil {
@@ -61,7 +61,7 @@ func (q *PriorityQueue) Dequeue() (string, error) {
 	}
 
 	// nothing to dequeue; wait on items
-	ev, err := WaitPrefixEvents(
+	evc, err := WaitPrefixEvents(
 		q.client,
 		q.key,
 		resp.Header.Revision,
@@ -70,7 +70,10 @@ func (q *PriorityQueue) Dequeue() (string, error) {
 		return "", err
 	}
 
-	ok, err := deleteRevKey(q.client, string(ev.Kv.Key), ev.Kv.ModRevision)
+	// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+	// Goose does not resolve a type alias when it selects a field through a pointer.
+	var ev *mvccpb.Event = evc
+	ok, err := deleteRevKey(q.client.KV, string(ev.Kv.Key), ev.Kv.ModRevision)
 	if err != nil {
 		return "", err
 	} else if !ok {

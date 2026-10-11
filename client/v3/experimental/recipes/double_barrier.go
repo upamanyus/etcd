@@ -83,7 +83,7 @@ func (b *DoubleBarrier) Enter() error {
 			// TODO(ahrtr): we might need to compare ek.key and
 			// string(lastWaiter.Key), they should be equal.
 			// unblock all other waiters
-			_, err = client.Put(b.ctx, b.key+"/ready", "")
+			_, err = client.KV.Put(b.ctx, b.key+"/ready", "")
 			return err
 		}
 	}
@@ -99,7 +99,7 @@ func (b *DoubleBarrier) Enter() error {
 // enteredClients gets all the entered clients, which are ordered by the
 // createRevision in ascending order.
 func (b *DoubleBarrier) enteredClients(cli *clientv3.Client) (*clientv3.GetResponse, error) {
-	resp, err := cli.Get(b.ctx, b.key+"/waiters", clientv3.WithPrefix(),
+	resp, err := cli.KV.Get(b.ctx, b.key+"/waiters", clientv3.WithPrefix(),
 		clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortAscend))
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (b *DoubleBarrier) enteredClients(cli *clientv3.Client) (*clientv3.GetRespo
 // Leave waits for "count" processes to leave the barrier then returns
 func (b *DoubleBarrier) Leave() error {
 	client := b.s.Client()
-	resp, err := client.Get(b.ctx, b.key+"/waiters", clientv3.WithPrefix())
+	resp, err := client.KV.Get(b.ctx, b.key+"/waiters", clientv3.WithPrefix())
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func (b *DoubleBarrier) Leave() error {
 
 	if len(resp.Kvs) == 1 && isLowest {
 		// this is the only node in the barrier; finish up
-		if _, err = client.Delete(b.ctx, b.key+"/ready"); err != nil {
+		if _, err = client.KV.Delete(b.ctx, b.key+"/ready"); err != nil {
 			return err
 		}
 		return b.myKey.Delete()

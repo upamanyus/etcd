@@ -69,7 +69,7 @@ func (rwm *RWMutex) waitOnLastRev(pfx string) (bool, error) {
 	client := rwm.s.Client()
 	// get key that's blocking myKey
 	opts := append(v3.WithLastRev(), v3.WithMaxModRev(rwm.myKey.Revision()-1))
-	lastKey, err := client.Get(rwm.ctx, pfx, opts...)
+	lastKey, err := client.KV.Get(rwm.ctx, pfx, opts...)
 	if err != nil {
 		return false, err
 	}

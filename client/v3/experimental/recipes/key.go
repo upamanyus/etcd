@@ -139,7 +139,7 @@ type EphemeralKV struct{ RemoteKV }
 
 // newEphemeralKV creates a new key/value pair associated with a session lease
 func newEphemeralKV(s *concurrency.Session, key, val string) (*EphemeralKV, error) {
-	k, err := newKV(s.Client(), key, val, s.Lease())
+	k, err := newKV(s.Client().KV, key, val, s.Lease())
 	if err != nil {
 		return nil, err
 	}

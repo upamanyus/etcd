@@ -34,7 +34,7 @@ func NewQueue(client *v3.Client, keyPrefix string) *Queue {
 }
 
 func (q *Queue) Enqueue(val string) error {
-	_, err := newUniqueKV(q.client, q.keyPrefix, val)
+	_, err := newUniqueKV(q.client.KV, q.keyPrefix, val)
 	return err
 }
 
@@ -42,12 +42,12 @@ func (q *Queue) Enqueue(val string) error {
 // queue is empty, Dequeue blocks until elements are available.
 func (q *Queue) Dequeue() (string, error) {
 	// TODO: fewer round trips by fetching more than one key
-	resp, err := q.client.Get(q.ctx, q.keyPrefix, v3.WithFirstRev()...)
+	resp, err := q.client.KV.Get(q.ctx, q.keyPrefix, v3.WithFirstRev()...)
 	if err != nil {
 		return "", err
 	}
 
-	kv, err := claimFirstKey(q.client, resp.Kvs)
+	kv, err := claimFirstKey(q.client.KV, resp.Kvs)
 	if err != nil {
 		return "", err
 	} else if kv != nil {
@@ -58,7 +58,7 @@ func (q *Queue) Dequeue() (string, error) {
 	}
 
 	// nothing yet; wait on elements
-	ev, err := WaitPrefixEvents(
+	evc, err := WaitPrefixEvents(
 		q.client,
 		q.keyPrefix,
 		resp.Header.Revision,
@@ -67,7 +67,10 @@ func (q *Queue) Dequeue() (string, error) {
 		return "", err
 	}
 
-	ok, err := deleteRevKey(q.client, string(ev.Kv.Key), ev.Kv.ModRevision)
+	// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+	// Goose does not resolve a type alias when it selects a field through a pointer.
+	var ev *mvccpb.Event = evc
+	ok, err := deleteRevKey(q.client.KV, string(ev.Kv.Key), ev.Kv.ModRevision)
 	if err != nil {
 		return "", err
 	} else if !ok {

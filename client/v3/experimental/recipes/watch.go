@@ -25,7 +25,7 @@ import (
 func WaitEvents(c *clientv3.Client, key string, rev int64, evs []mvccpb.Event_EventType) (*clientv3.Event, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	wc := c.Watch(ctx, key, clientv3.WithRev(rev))
+	wc := c.Watcher.Watch(ctx, key, clientv3.WithRev(rev))
 	if wc == nil {
 		return nil, ErrNoWatcher
 	}
@@ -35,7 +35,7 @@ func WaitEvents(c *clientv3.Client, key string, rev int64, evs []mvccpb.Event_Ev
 func WaitPrefixEvents(c *clientv3.Client, prefix string, rev int64, evs []mvccpb.Event_EventType) (*clientv3.Event, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	wc := c.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithRev(rev))
+	wc := c.Watcher.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithRev(rev))
 	if wc == nil {
 		return nil, ErrNoWatcher
 	}
@@ -45,7 +45,10 @@ func WaitPrefixEvents(c *clientv3.Client, prefix string, rev int64, evs []mvccpb
 func waitEvents(wc clientv3.WatchChan, evs []mvccpb.Event_EventType) *clientv3.Event {
 	i := 0
 	for wresp := range wc {
-		for _, ev := range wresp.Events {
+		// Gooseable: mvccpb.Event rather than its alias clientv3.Event (the same type):
+		// Goose does not resolve a type alias when it selects a field through a pointer.
+		var events []*mvccpb.Event = wresp.Events
+		for _, ev := range events {
 			if ev.Type == evs[i] {
 				i++
 				if i == len(evs) {
