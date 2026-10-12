@@ -53,6 +53,37 @@ func TestTxnError(t *testing.T) {
 	}
 }
 
+// TestTxnDeleteFromKeyThenIgnorePut checks that a txn that deletes every key
+// from a key on and then puts that key is rejected as a duplicate key, as it
+// is when the delete names the key alone. Such a put with IgnoreValue or
+// IgnoreLease would find no previous key-value when it runs.
+func TestTxnDeleteFromKeyThenIgnorePut(t *testing.T) {
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	kv := clus.RandClient()
+	ctx := t.Context()
+
+	_, err := kv.Put(ctx, "a", "v")
+	require.NoError(t, err)
+
+	for _, opt := range []clientv3.OpOption{clientv3.WithIgnoreValue(), clientv3.WithIgnoreLease()} {
+		_, err = kv.Txn(ctx).Then(clientv3.OpDelete("a", clientv3.WithFromKey()), clientv3.OpPut("a", "", opt)).Commit()
+		require.ErrorIs(t, err, rpctypes.ErrDuplicateKey)
+	}
+
+	resp, err := kv.Get(ctx, "a")
+	require.NoError(t, err)
+	require.Len(t, resp.Kvs, 1)
+	require.Equal(t, "v", string(resp.Kvs[0].Value))
+
+	// a put of a key before the deleted range does not overlap it
+	_, err = kv.Txn(ctx).Then(clientv3.OpDelete("b", clientv3.WithFromKey()), clientv3.OpPut("a", "", clientv3.WithIgnoreValue())).Commit()
+	require.NoError(t, err)
+}
+
 func TestTxnWriteFail(t *testing.T) {
 	integration.BeforeTest(t)
 

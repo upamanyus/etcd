@@ -247,9 +247,13 @@ func checkIntervals(reqs []*pb.RequestOp) (map[string]struct{}, adt.IntervalTree
 			continue
 		}
 		var iv adt.Interval
-		if len(dreq.RangeEnd) != 0 {
+		switch {
+		case len(dreq.RangeEnd) == 1 && dreq.RangeEnd[0] == 0:
+			// a range end of "\x00" deletes every key from the key on
+			iv = adt.NewStringAffineInterval(string(dreq.Key), "")
+		case len(dreq.RangeEnd) != 0:
 			iv = adt.NewStringAffineInterval(string(dreq.Key), string(dreq.RangeEnd))
-		} else {
+		default:
 			iv = adt.NewStringAffinePoint(string(dreq.Key))
 		}
 		dels.Insert(iv, struct{}{})
