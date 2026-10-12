@@ -271,10 +271,7 @@ func TestLessorRenewWithCheckpointer(t *testing.T) {
 
 	le := newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL})
 	fakerCheckerpointer := func(ctx context.Context, cp *pb.LeaseCheckpointRequest) error {
-		for _, cp := range cp.GetCheckpoints() {
-			le.Checkpoint(LeaseID(cp.GetID()), cp.GetRemaining_TTL())
-		}
-		return nil
+		return le.Checkpoint(cp.GetCheckpoints())
 	}
 	defer le.Stop()
 	// Set checkpointer
@@ -593,7 +590,7 @@ func TestLessorCheckpointsRestoredOnPromote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	le.Checkpoint(l.ID, 5)
+	le.Checkpoint([]*pb.LeaseCheckpoint{{ID: int64(l.ID), Remaining_TTL: 5}})
 	le.Promote(0)
 	remaining := l.Remaining().Seconds()
 	if !(remaining > 4 && remaining < 5) {
@@ -656,7 +653,7 @@ func TestLessorCheckpointPersistenceAfterRestart(t *testing.T) {
 			if l.getRemainingTTL() != ttl {
 				t.Errorf("getRemainingTTL() = %d, expected: %d", l.getRemainingTTL(), ttl)
 			}
-			le.Checkpoint(2, checkpointTTL)
+			le.Checkpoint([]*pb.LeaseCheckpoint{{ID: 2, Remaining_TTL: checkpointTTL}})
 			if l.getRemainingTTL() != checkpointTTL {
 				t.Errorf("getRemainingTTL() = %d, expected: %d", l.getRemainingTTL(), checkpointTTL)
 			}
@@ -667,6 +664,57 @@ func TestLessorCheckpointPersistenceAfterRestart(t *testing.T) {
 				t.Errorf("getRemainingTTL() = %d, expected: %d", l.getRemainingTTL(), tc.expectRemainingTTL)
 			}
 		})
+	}
+}
+
+// TestLessorCheckpointBatchPersistence checks that Checkpoint persists the remainingTTL of every
+// lease of the batch, in a single batch transaction, and ignores unknown leases.
+func TestLessorCheckpointBatchPersistence(t *testing.T) {
+	const ttl int64 = 10
+
+	lg := zap.NewNop()
+	dir, be := NewTestBackend(t)
+	defer os.RemoveAll(dir)
+	defer be.Close()
+
+	cfg := LessorConfig{MinLeaseTTL: minLeaseTTL}
+	le := newLessor(lg, be, clusterLatest(), cfg)
+	ids := []LeaseID{1, 2, 3}
+	for _, id := range ids {
+		if _, err := le.Grant(id, ttl); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sections := 0
+	be.SetTxPostLockInsideApplyHook(func() { sections++ })
+	cps := []*pb.LeaseCheckpoint{
+		{ID: 1, Remaining_TTL: 5},
+		{ID: 4, Remaining_TTL: 5}, // unknown lease
+		{ID: 2, Remaining_TTL: 6},
+		{ID: 3, Remaining_TTL: 7},
+	}
+	if err := le.Checkpoint(cps); err != nil {
+		t.Fatal(err)
+	}
+	if sections != 1 {
+		t.Errorf("Checkpoint took the batch lock %d times, expected 1", sections)
+	}
+	be.SetTxPostLockInsideApplyHook(nil)
+	le.Stop()
+
+	le2 := newLessor(lg, be, clusterLatest(), cfg)
+	defer le2.Stop()
+	for i, id := range ids {
+		expected := int64(5 + i)
+		if l := le2.Lookup(id); l == nil {
+			t.Errorf("lease %d not recovered", id)
+		} else if l.getRemainingTTL() != expected {
+			t.Errorf("lease %d: getRemainingTTL() = %d, expected: %d", id, l.getRemainingTTL(), expected)
+		}
+	}
+	if le2.Lookup(4) != nil {
+		t.Errorf("unknown lease 4 was created by Checkpoint")
 	}
 }
 

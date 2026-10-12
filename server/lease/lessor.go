@@ -95,9 +95,11 @@ type Lessor interface {
 	// will be returned.
 	Revoke(id LeaseID) error
 
-	// Checkpoint applies the remainingTTL of a lease. The remainingTTL is used in Promote to set
-	// the expiry of leases to less than the full TTL when possible.
-	Checkpoint(id LeaseID, remainingTTL int64) error
+	// Checkpoint applies the remainingTTLs of the given leases. The remainingTTL is used in Promote
+	// to set the expiry of leases to less than the full TTL when possible. Unknown leases are
+	// ignored. When checkpoints are persisted, the leases are written to the backend in a single
+	// batch transaction.
+	Checkpoint(cps []*pb.LeaseCheckpoint) error
 
 	// Attach attaches given leaseItem to the lease with given LeaseID.
 	// If the lease does not exist, an error will be returned.
@@ -364,15 +366,27 @@ func (le *lessor) Revoke(id LeaseID) error {
 	return nil
 }
 
-func (le *lessor) Checkpoint(id LeaseID, remainingTTL int64) error {
+func (le *lessor) Checkpoint(cps []*pb.LeaseCheckpoint) error {
 	le.mu.Lock()
 	defer le.mu.Unlock()
 
-	if l, ok := le.leaseMap[id]; ok {
+	var tx backend.BatchTx
+	if le.shouldPersistCheckpoints() {
+		// persist all the checkpoints in one batch transaction, so that a checkpoint
+		// request is committed together with its consistent index.
+		tx = le.b.BatchTx()
+		tx.LockInsideApply()
+		defer tx.Unlock()
+	}
+	for _, cp := range cps {
+		l, ok := le.leaseMap[LeaseID(cp.ID)]
+		if !ok {
+			continue
+		}
 		// when checkpointing, we only update the remainingTTL, Promote is responsible for applying this to lease expiry
-		l.remainingTTL = remainingTTL
-		if le.shouldPersistCheckpoints() {
-			l.persistTo(le.b)
+		l.remainingTTL = cp.Remaining_TTL
+		if tx != nil {
+			l.unsafePersistTo(tx)
 		}
 		if le.isPrimary() {
 			// schedule the next checkpoint as needed
@@ -851,7 +865,7 @@ func (fl *FakeLessor) Grant(id LeaseID, ttl int64) (*Lease, error) {
 
 func (fl *FakeLessor) Revoke(id LeaseID) error { return nil }
 
-func (fl *FakeLessor) Checkpoint(id LeaseID, remainingTTL int64) error { return nil }
+func (fl *FakeLessor) Checkpoint(cps []*pb.LeaseCheckpoint) error { return nil }
 
 func (fl *FakeLessor) Attach(id LeaseID, items []LeaseItem) error { return nil }
 

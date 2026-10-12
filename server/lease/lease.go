@@ -53,10 +53,15 @@ func (l *Lease) expired() bool {
 }
 
 func (l *Lease) persistTo(b backend.Backend) {
-	lpb := leasepb.Lease{ID: int64(l.ID), TTL: l.ttl, RemainingTTL: l.remainingTTL}
 	tx := b.BatchTx()
 	tx.LockInsideApply()
 	defer tx.Unlock()
+	l.unsafePersistTo(tx)
+}
+
+// unsafePersistTo writes the lease to tx, which must be locked.
+func (l *Lease) unsafePersistTo(tx backend.UnsafeWriter) {
+	lpb := leasepb.Lease{ID: int64(l.ID), TTL: l.ttl, RemainingTTL: l.remainingTTL}
 	schema.MustUnsafePutLease(tx, &lpb)
 }
 
