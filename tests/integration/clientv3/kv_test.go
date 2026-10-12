@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -469,6 +470,43 @@ func TestKVGetKeysOnlyWithCountOnly(t *testing.T) {
 	}
 	if len(resp.Kvs) > 0 {
 		t.Fatalf("response should contain CountOnly")
+	}
+}
+
+// TestKVGetKeysOnlyLease asserts that a keys-only Get returns the lease of
+// the key, whatever the sort target.
+func TestKVGetKeysOnlyLease(t *testing.T) {
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	cli := clus.RandClient()
+	ctx := t.Context()
+
+	lresp, err := cli.Grant(ctx, 60)
+	require.NoError(t, err)
+	presp, err := cli.Put(ctx, "foo", "bar", clientv3.WithLease(lresp.ID))
+	require.NoError(t, err)
+	leasedRev := presp.Header.Revision
+
+	targets := []clientv3.SortTarget{clientv3.SortByKey, clientv3.SortByVersion, clientv3.SortByValue}
+	for _, target := range targets {
+		resp, err := cli.Get(ctx, "foo", clientv3.WithKeysOnly(), clientv3.WithSort(target, clientv3.SortAscend))
+		require.NoError(t, err)
+		require.Len(t, resp.Kvs, 1)
+		assert.Emptyf(t, resp.Kvs[0].Value, "sort target %v", target)
+		assert.Equalf(t, int64(lresp.ID), resp.Kvs[0].Lease, "sort target %v", target)
+	}
+
+	// The key no longer has the lease, but it had it at leasedRev.
+	_, err = cli.Put(ctx, "foo", "bar")
+	require.NoError(t, err)
+	for _, target := range targets {
+		resp, err := cli.Get(ctx, "foo", clientv3.WithKeysOnly(), clientv3.WithRev(leasedRev), clientv3.WithSort(target, clientv3.SortAscend))
+		require.NoError(t, err)
+		require.Len(t, resp.Kvs, 1)
+		assert.Equalf(t, int64(lresp.ID), resp.Kvs[0].Lease, "sort target %v, revision %d", target, leasedRev)
 	}
 }
 

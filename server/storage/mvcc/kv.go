@@ -27,7 +27,7 @@ type RangeOptions struct {
 	Limit          int64
 	Rev            int64
 	CountOnly      bool
-	FastKeysOnly   bool
+	FastKeysOnly   bool // from the in-memory index alone: no value and no lease
 	WithTotalCount bool
 }
 

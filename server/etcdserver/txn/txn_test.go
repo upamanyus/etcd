@@ -460,3 +460,38 @@ func computeFileHash(filePath string) (string, error) {
 	}
 	return string(h.Sum(nil)), nil
 }
+
+// TestRangeKeysOnlyLease asserts that a keys-only range returns the lease of
+// each key, whatever the sort target, at the current revision and at a past
+// one.
+func TestRangeKeysOnlyLease(t *testing.T) {
+	s, _ := setup(t, testSetup{lease: 7})
+	s.Put([]byte("a"), []byte("v"), lease.LeaseID(7))
+	s.Put([]byte("b"), []byte("v"), lease.LeaseID(7))
+	leasedRev := s.Rev()
+	s.Put([]byte("b"), []byte("v"), lease.NoLease)
+
+	tcs := []struct {
+		name      string
+		key       string
+		rev       int64
+		wantLease int64
+	}{
+		{name: "leased key", key: "a", wantLease: 7},
+		{name: "lease removed", key: "b", wantLease: 0},
+		{name: "lease removed, past revision", key: "b", rev: leasedRev, wantLease: 7},
+	}
+	for _, tc := range tcs {
+		for _, target := range []pb.RangeRequest_SortTarget{pb.RangeRequest_KEY, pb.RangeRequest_VERSION, pb.RangeRequest_VALUE} {
+			t.Run(tc.name+"/"+target.String(), func(t *testing.T) {
+				resp, _, err := Range(t.Context(), zaptest.NewLogger(t), s, &pb.RangeRequest{
+					Key: []byte(tc.key), Revision: tc.rev, KeysOnly: true, SortTarget: target,
+				}, true)
+				require.NoError(t, err)
+				require.Len(t, resp.Kvs, 1)
+				assert.Empty(t, resp.Kvs[0].Value)
+				assert.Equal(t, tc.wantLease, resp.Kvs[0].Lease)
+			})
+		}
+	}
+}
