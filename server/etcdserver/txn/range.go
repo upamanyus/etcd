@@ -85,7 +85,7 @@ func executeRange(ctx context.Context, lg *zap.Logger, txnRead mvcc.TxnRead, r *
 
 func rangeLimit(r *pb.RangeRequest) int64 {
 	limit := r.Limit
-	if !IsDefaultOrdering(r.SortTarget, r.SortOrder) || HasRevisionFilters(r) {
+	if !IsDefaultOrdering(r.SortTarget, rangeSortOrder(r)) || HasRevisionFilters(r) {
 		limit = 0
 	}
 	if limit > 0 && limit < math.MaxInt64 {
@@ -122,11 +122,17 @@ func filterRangeResults(rr *mvcc.RangeResult, r *pb.RangeRequest) {
 	}
 }
 
-func sortRangeResults(rr *mvcc.RangeResult, r *pb.RangeRequest, lg *zap.Logger) {
-	sortOrder := r.SortOrder
-	if r.SortTarget != pb.RangeRequest_KEY && sortOrder == pb.RangeRequest_NONE {
-		sortOrder = pb.RangeRequest_ASCEND
+// rangeSortOrder returns the order in which the results of r are sorted:
+// r.SortOrder, except that NONE means ASCEND when the target is not 'KEY'.
+func rangeSortOrder(r *pb.RangeRequest) pb.RangeRequest_SortOrder {
+	if r.SortTarget != pb.RangeRequest_KEY && r.SortOrder == pb.RangeRequest_NONE {
+		return pb.RangeRequest_ASCEND
 	}
+	return r.SortOrder
+}
+
+func sortRangeResults(rr *mvcc.RangeResult, r *pb.RangeRequest, lg *zap.Logger) {
+	sortOrder := rangeSortOrder(r)
 
 	if !IsDefaultOrdering(r.SortTarget, sortOrder) {
 		var sorter sort.Interface

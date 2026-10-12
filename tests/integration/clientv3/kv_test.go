@@ -212,6 +212,39 @@ func TestKVRange(t *testing.T) {
 	}
 }
 
+// TestKVGetSortNoneLimit ensures that a Get sorted by a target other than the
+// key with SortNone, which the server sorts in ascending order, returns the
+// first keys of the whole sorted range, as with SortAscend.
+func TestKVGetSortNoneLimit(t *testing.T) {
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	kv := clus.RandClient()
+	ctx := t.Context()
+
+	// versions: a=3, b=2, c=1
+	for _, key := range []string{"c", "b", "b", "a", "a", "a"} {
+		_, err := kv.Put(ctx, key, "")
+		require.NoError(t, err)
+	}
+
+	for _, order := range []clientv3.SortOrder{clientv3.SortNone, clientv3.SortAscend} {
+		resp, err := kv.Get(ctx, "a",
+			clientv3.WithRange("d"),
+			clientv3.WithSort(clientv3.SortByVersion, order),
+			clientv3.WithLimit(1),
+		)
+		require.NoError(t, err)
+		require.Lenf(t, resp.Kvs, 1, "order %v", order)
+		require.Equalf(t, "c", string(resp.Kvs[0].Key), "order %v", order)
+		require.Equalf(t, int64(1), resp.Kvs[0].Version, "order %v", order)
+		require.Truef(t, resp.More, "order %v", order)
+		require.Equalf(t, int64(3), resp.Count, "order %v", order)
+	}
+}
+
 func TestKVGetErrConnClosed(t *testing.T) {
 	integration.BeforeTest(t)
 

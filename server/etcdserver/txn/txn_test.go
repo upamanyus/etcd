@@ -302,6 +302,46 @@ func setup(t *testing.T, setup testSetup) (mvcc.KV, lease.Lessor) {
 	return s, lessor
 }
 
+// TestRangeSortNoneLimit checks that a range sorted by a target other than
+// the key with SortOrder NONE, which is sorted in ascending order, is limited
+// after it is sorted, as with SortOrder ASCEND.
+func TestRangeSortNoneLimit(t *testing.T) {
+	s, _ := setup(t, testSetup{})
+	// "c" has the lowest version, create revision, mod revision and value.
+	s.Put([]byte("c"), []byte("1"), lease.NoLease)
+	for i := 0; i < 2; i++ {
+		s.Put([]byte("b"), []byte("2"), lease.NoLease)
+	}
+	for i := 0; i < 3; i++ {
+		s.Put([]byte("a"), []byte("3"), lease.NoLease)
+	}
+
+	targets := []pb.RangeRequest_SortTarget{
+		pb.RangeRequest_VERSION,
+		pb.RangeRequest_CREATE,
+		pb.RangeRequest_MOD,
+		pb.RangeRequest_VALUE,
+	}
+	for _, target := range targets {
+		for _, order := range []pb.RangeRequest_SortOrder{pb.RangeRequest_NONE, pb.RangeRequest_ASCEND} {
+			t.Run(target.String()+"/"+order.String(), func(t *testing.T) {
+				resp, _, err := Range(t.Context(), zaptest.NewLogger(t), s, &pb.RangeRequest{
+					Key:        []byte("a"),
+					RangeEnd:   []byte("d"),
+					Limit:      1,
+					SortTarget: target,
+					SortOrder:  order,
+				}, true)
+				require.NoError(t, err)
+				require.Len(t, resp.Kvs, 1)
+				assert.Equal(t, "c", string(resp.Kvs[0].Key))
+				assert.True(t, resp.More)
+				assert.Equal(t, int64(3), resp.Count)
+			})
+		}
+	}
+}
+
 func TestSkippedRangeExecutionResponseHeaderRevision(t *testing.T) {
 	tests := []struct {
 		name string
