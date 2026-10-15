@@ -1352,14 +1352,6 @@ func stepLeader(r *raft, m *pb.Message) error {
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
-		// only one voting member (the leader) in the cluster
-		if r.trk.IsSingleton() {
-			if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.GetTo() != None {
-				r.send(resp)
-			}
-			return nil
-		}
-
 		// Postpone read only request when this leader has not committed
 		// any log entry at its term.
 		if !r.committedEntryInCurrentTerm() {
@@ -2147,6 +2139,14 @@ func sendMsgReadIndexResponse(r *raft, m *pb.Message) {
 	// thinking: use an internally defined context instead of the user given context.
 	// We can express this in terms of the term and index instead of a user-supplied value.
 	// This would allow multiple reads to piggyback on the same message.
+	// Only one voting member, the leader itself, which has committed an entry
+	// of its term: its commit index needs no confirmation.
+	if _, isVoter := r.trk.Voters[0][r.id]; isVoter && r.trk.IsSingleton() {
+		if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.GetTo() != None {
+			r.send(resp)
+		}
+		return
+	}
 	switch r.readOnly.option {
 	// If more than the local vote is needed, go through a full broadcast.
 	case ReadOnlySafe:
