@@ -356,7 +356,7 @@ func (w *watcher) Watch(ctx context.Context, key string, opts ...OpOption) Watch
 
 		// submit request
 		select {
-		case reqc <- wr:
+		case reqc <- watchStreamRequest(wr):
 			ok = true
 		case <-wr.ctx.Done():
 			ok = false
@@ -430,7 +430,7 @@ func (w *watcher) RequestProgress(ctx context.Context) (err error) {
 	pr := &progressRequest{}
 
 	select {
-	case reqc <- pr:
+	case reqc <- watchStreamRequest(pr):
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
