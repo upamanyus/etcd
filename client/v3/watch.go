@@ -623,6 +623,9 @@ func (w *watchGRPCStream) run() {
 					// signal to stream goroutine to update closingc
 					close(ws.recvc)
 					closing[ws] = struct{}{}
+					// nothing may be sent on the closed recvc: drop the
+					// substream so that broadcastResponse skips it
+					delete(w.substreams, pbresp.WatchId)
 				}
 
 				// reset for next iteration
