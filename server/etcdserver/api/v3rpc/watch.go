@@ -430,6 +430,85 @@ func (sws *serverWatchStream) sendLoop() {
 		}
 	}()
 
+	// sendWatch sends the mvcc watch response wresp (buffered if its watch id is not yet
+	// announced); false if the stream failed.
+	sendWatch := func(wresp mvcc.WatchResponse) bool {
+		start := time.Now()
+
+		// TODO(fuweid): do we still need copy here?
+		evs := wresp.Events
+		events := make([]*mvccpb.Event, len(evs))
+		sws.mu.RLock()
+		needPrevKV := sws.prevKV[wresp.WatchID]
+		sws.mu.RUnlock()
+		for i := range evs {
+			events[i] = evs[i]
+			if needPrevKV && !IsCreateEvent(evs[i]) {
+				opt := mvcc.RangeOptions{Rev: evs[i].Kv.ModRevision - 1}
+				r, err := sws.watchable.Range(context.TODO(), evs[i].Kv.Key, nil, opt)
+				if err == nil && len(r.KVs) != 0 {
+					events[i].PrevKv = r.KVs[0]
+				}
+			}
+		}
+
+		canceled := wresp.CompactRevision != 0
+		wr := &pb.WatchResponse{
+			Header:          sws.newResponseHeader(wresp.Revision),
+			WatchId:         int64(wresp.WatchID),
+			Events:          events,
+			CompactRevision: wresp.CompactRevision,
+			Canceled:        canceled,
+		}
+
+		// Progress notifications can have WatchID -1
+		// if they announce on behalf of multiple watchers
+		if wresp.WatchID != clientv3.InvalidWatchID {
+			if _, okID := ids[wresp.WatchID]; !okID {
+				// buffer if id not yet announced
+				wrs := append(pending[wresp.WatchID], wr)
+				pending[wresp.WatchID] = wrs
+				return true
+			}
+		}
+
+		mvcc.ReportEventReceived(len(evs))
+
+		sws.mu.RLock()
+		fragmented, ok := sws.fragment[wresp.WatchID]
+		sws.mu.RUnlock()
+
+		var serr error
+		// gofail: var beforeSendWatchResponse struct{}
+		if !fragmented && !ok {
+			serr = sws.gRPCStream.Send(wr)
+		} else {
+			serr = sendFragments(wr, sws.maxRequestBytes, sws.gRPCStream.Send)
+		}
+
+		if serr != nil {
+			if isClientCtxErr(sws.gRPCStream.Context().Err(), serr) {
+				sws.lg.Debug("failed to send watch response to gRPC stream", zap.Error(serr))
+			} else {
+				sws.lg.Warn("failed to send watch response to gRPC stream", zap.Error(serr))
+				streamFailures.WithLabelValues("send", "watch").Inc()
+			}
+			return false
+		}
+
+		sws.mu.Lock()
+		if len(evs) > 0 && sws.progress[wresp.WatchID] {
+			// elide next progress update if sent a key update
+			sws.progress[wresp.WatchID] = false
+		}
+		sws.mu.Unlock()
+
+		totalDur := time.Since(start)
+		watchSendLoopWatchStreamDuration.Observe(totalDur.Seconds())
+		watchSendLoopWatchStreamDurationPerEvent.Observe(totalDur.Seconds() / float64(len(evs)))
+		return true
+	}
+
 	for {
 		select {
 		case wresp, ok := <-sws.watchStream.Chan():
@@ -437,83 +516,32 @@ func (sws *serverWatchStream) sendLoop() {
 				return
 			}
 
-			start := time.Now()
-
-			// TODO(fuweid): do we still need copy here?
-			evs := wresp.Events
-			events := make([]*mvccpb.Event, len(evs))
-			sws.mu.RLock()
-			needPrevKV := sws.prevKV[wresp.WatchID]
-			sws.mu.RUnlock()
-			for i := range evs {
-				events[i] = evs[i]
-				if needPrevKV && !IsCreateEvent(evs[i]) {
-					opt := mvcc.RangeOptions{Rev: evs[i].Kv.ModRevision - 1}
-					r, err := sws.watchable.Range(context.TODO(), evs[i].Kv.Key, nil, opt)
-					if err == nil && len(r.KVs) != 0 {
-						events[i].PrevKv = r.KVs[0]
-					}
-				}
-			}
-
-			canceled := wresp.CompactRevision != 0
-			wr := &pb.WatchResponse{
-				Header:          sws.newResponseHeader(wresp.Revision),
-				WatchId:         int64(wresp.WatchID),
-				Events:          events,
-				CompactRevision: wresp.CompactRevision,
-				Canceled:        canceled,
-			}
-
-			// Progress notifications can have WatchID -1
-			// if they announce on behalf of multiple watchers
-			if wresp.WatchID != clientv3.InvalidWatchID {
-				if _, okID := ids[wresp.WatchID]; !okID {
-					// buffer if id not yet announced
-					wrs := append(pending[wresp.WatchID], wr)
-					pending[wresp.WatchID] = wrs
-					continue
-				}
-			}
-
-			mvcc.ReportEventReceived(len(evs))
-
-			sws.mu.RLock()
-			fragmented, ok := sws.fragment[wresp.WatchID]
-			sws.mu.RUnlock()
-
-			var serr error
-			// gofail: var beforeSendWatchResponse struct{}
-			if !fragmented && !ok {
-				serr = sws.gRPCStream.Send(wr)
-			} else {
-				serr = sendFragments(wr, sws.maxRequestBytes, sws.gRPCStream.Send)
-			}
-
-			if serr != nil {
-				if isClientCtxErr(sws.gRPCStream.Context().Err(), serr) {
-					sws.lg.Debug("failed to send watch response to gRPC stream", zap.Error(serr))
-				} else {
-					sws.lg.Warn("failed to send watch response to gRPC stream", zap.Error(serr))
-					streamFailures.WithLabelValues("send", "watch").Inc()
-				}
+			if !sendWatch(wresp) {
 				return
 			}
-
-			sws.mu.Lock()
-			if len(evs) > 0 && sws.progress[wresp.WatchID] {
-				// elide next progress update if sent a key update
-				sws.progress[wresp.WatchID] = false
-			}
-			sws.mu.Unlock()
-
-			totalDur := time.Since(start)
-			watchSendLoopWatchStreamDuration.Observe(totalDur.Seconds())
-			watchSendLoopWatchStreamDurationPerEvent.Observe(totalDur.Seconds() / float64(len(evs)))
 
 		case c, ok := <-sws.ctrlStream:
 			if !ok {
 				return
+			}
+			if c.Created {
+				// The watch responses queued before this one go first: a progress
+				// notification answering a progress request received before this
+				// watch's creation must not reach the client after its Created
+				// response, or the client would apply it to the new watch.
+				for drained := false; !drained; {
+					select {
+					case wresp, ok := <-sws.watchStream.Chan():
+						if !ok {
+							return
+						}
+						if !sendWatch(wresp) {
+							return
+						}
+					default:
+						drained = true
+					}
+				}
 			}
 			start := time.Now()
 			if err := sws.gRPCStream.Send(c); err != nil {
