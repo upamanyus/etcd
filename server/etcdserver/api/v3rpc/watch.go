@@ -143,7 +143,7 @@ type serverWatchStream struct {
 	watchStream mvcc.WatchStream
 	ctrlStream  chan *pb.WatchResponse
 
-	// mu protects progress, prevKV, fragment
+	// mu protects progress, prevKV, fragment, canceling
 	mu sync.RWMutex
 	// tracks the watchID that stream might need to send progress to
 	// TODO: combine progress and prevKV into a single struct?
@@ -152,6 +152,9 @@ type serverWatchStream struct {
 	prevKV map[mvcc.WatchID]bool
 	// records fragmented watch IDs
 	fragment map[mvcc.WatchID]bool
+	// records, per canceled watch ID, a channel sendLoop closes once
+	// the canceled watcher's responses are out of watchStream.Chan()
+	canceling map[mvcc.WatchID]chan struct{}
 
 	// closec indicates the stream is closed.
 	closec chan struct{}
@@ -181,6 +184,8 @@ func (ws *watchServer) Watch(stream pb.Watch_WatchServer) (err error) {
 		progress: make(map[mvcc.WatchID]bool),
 		prevKV:   make(map[mvcc.WatchID]bool),
 		fragment: make(map[mvcc.WatchID]bool),
+
+		canceling: make(map[mvcc.WatchID]chan struct{}),
 
 		closec: make(chan struct{}),
 	}
@@ -247,6 +252,9 @@ func (sws *serverWatchStream) isWatchPermitted(wcr *pb.WatchCreateRequest) error
 }
 
 func (sws *serverWatchStream) recvLoop() error {
+	// a new watcher may reuse the ID of a canceled one, so it waits until
+	// the canceled watchers' responses are out of watchStream.Chan()
+	var canceled []chan struct{}
 	for {
 		req, err := sws.gRPCStream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -327,6 +335,15 @@ func (sws *serverWatchStream) recvLoop() error {
 				creq.RangeEnd = []byte{}
 			}
 
+			for _, done := range canceled {
+				select {
+				case <-done:
+				case <-sws.closec:
+					return nil
+				}
+			}
+			canceled = nil
+
 			filters := FiltersFromRequest(creq)
 			ctx, _ := traceutil.Tracer.Start(sws.gRPCStream.Context(), "watch", trace.WithAttributes(
 				attribute.String("key", string(creq.Key)),
@@ -374,6 +391,12 @@ func (sws *serverWatchStream) recvLoop() error {
 				id := uv.CancelRequest.WatchId
 				err := sws.watchStream.Cancel(mvcc.WatchID(id))
 				if err == nil {
+					done := make(chan struct{})
+					canceled = append(canceled, done)
+					sws.mu.Lock()
+					sws.canceling[mvcc.WatchID(id)] = done
+					sws.mu.Unlock()
+
 					wr := &pb.WatchResponse{
 						Header:   sws.newResponseHeader(sws.watchStream.Rev()),
 						WatchId:  id,
@@ -413,6 +436,15 @@ func (sws *serverWatchStream) sendLoop() {
 	ids := make(map[mvcc.WatchID]struct{})
 	// watch responses pending on a watch id creation message
 	pending := make(map[mvcc.WatchID][]*pb.WatchResponse)
+	// number of responses taken from watchStream.Chan()
+	taken := 0
+	// canceled watchers, each with responses among the first until taken
+	type drain struct {
+		id    mvcc.WatchID
+		until int
+		done  chan struct{}
+	}
+	var drains []drain
 
 	interval := GetProgressReportInterval()
 	progressTicker := time.NewTicker(interval)
@@ -435,6 +467,19 @@ func (sws *serverWatchStream) sendLoop() {
 		case wresp, ok := <-sws.watchStream.Chan():
 			if !ok {
 				return
+			}
+			taken++
+			stale := false
+			for _, d := range drains {
+				stale = stale || d.id == wresp.WatchID
+			}
+			for len(drains) > 0 && drains[0].until <= taken {
+				close(drains[0].done)
+				drains = drains[1:]
+			}
+			if stale {
+				mvcc.ReportEventReceived(len(wresp.Events))
+				continue
 			}
 
 			start := time.Now()
@@ -533,6 +578,15 @@ func (sws *serverWatchStream) sendLoop() {
 
 			if c.Canceled && wid != clientv3.InvalidWatchID {
 				delete(ids, wid)
+				sws.mu.Lock()
+				done := sws.canceling[wid]
+				delete(sws.canceling, wid)
+				sws.mu.Unlock()
+				if n := len(sws.watchStream.Chan()); n > 0 {
+					drains = append(drains, drain{wid, taken + n, done})
+				} else {
+					close(done)
+				}
 				continue
 			}
 			if c.Created {
