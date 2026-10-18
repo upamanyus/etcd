@@ -132,6 +132,7 @@ func (rt *readTx) RUnlock() { rt.mu.RUnlock() }
 
 func (rt *readTx) reset() {
 	rt.buf.reset()
+	rt.buf.bufVersion++
 	rt.buckets = make(map[BucketID]*bolt.Bucket)
 	rt.tx = nil
 	rt.txWg = new(sync.WaitGroup)

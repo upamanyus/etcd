@@ -312,7 +312,7 @@ func (b *backend) ConcurrentReadTx() ReadTx {
 	// by this line, "ConcurrentReadTx" code path is already protected against concurrent "writeback" operations
 	// which requires write lock to update "readTx.baseReadTx.buf".
 	// Which means setting "buf *txReadBuffer" with "readTx.buf.unsafeCopy()" is guaranteed to be up-to-date,
-	// whereas "txReadBufferCache.buf" may be stale from concurrent "writeback" operations.
+	// whereas "txReadBufferCache.buf" may be stale from concurrent "writeback" operations and commits.
 	// We only update "txReadBufferCache.buf" if we know "buf *txReadBuffer" is up-to-date.
 	// The update to "txReadBufferCache.buf" will benefit the following "ConcurrentReadTx" creation
 	// by avoiding copying "readTx.baseReadTx.buf".
