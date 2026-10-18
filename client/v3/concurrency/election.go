@@ -91,6 +91,14 @@ func (e *Election) Campaign(ctx context.Context, val string) error {
 	}
 
 	err = waitDeletes(ctx, client, e.keyPrefix, e.leaderRev-1)
+	if err == nil {
+		// the key may have been deleted while waiting, e.g. when its lease expired
+		var gresp *v3.GetResponse
+		gresp, err = client.Get(ctx, k)
+		if err == nil && (len(gresp.Kvs) == 0 || gresp.Kvs[0].CreateRevision != e.leaderRev) {
+			err = ErrSessionExpired
+		}
+	}
 	if err != nil {
 		// clean up in case of context cancel
 		select {
