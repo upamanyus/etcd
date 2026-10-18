@@ -440,6 +440,34 @@ func TestConcurrentReadTx(t *testing.T) {
 	}
 }
 
+// TestConcurrentReadTxAfterCommit ensures that a commit does not change what a
+// concurrent read transaction reads.
+func TestConcurrentReadTxAfterCommit(t *testing.T) {
+	b, _ := betesting.NewTmpBackend(t, time.Hour, 10000)
+	defer betesting.Close(t, b)
+
+	tx := b.BatchTx()
+	tx.Lock()
+	tx.UnsafeCreateBucket(schema.Key)
+	tx.UnsafePut(schema.Key, []byte("abc"), []byte("ABC"))
+	tx.Unlock()
+
+	rangeKeys := func() []string {
+		rtx := b.ConcurrentReadTx()
+		rtx.RLock()
+		defer rtx.RUnlock()
+		ks, _ := rtx.UnsafeRange(schema.Key, []byte("abc"), []byte("\xff"), 0)
+		var keys []string
+		for _, k := range ks {
+			keys = append(keys, string(k))
+		}
+		return keys
+	}
+	require.Equal(t, []string{"abc"}, rangeKeys(), "before commit")
+	b.ForceCommit()
+	require.Equal(t, []string{"abc"}, rangeKeys(), "after commit")
+}
+
 // TestBackendWritebackForEach checks that partially written / buffered
 // data is visited in the same order as fully committed data.
 func TestBackendWritebackForEach(t *testing.T) {
