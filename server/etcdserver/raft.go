@@ -72,9 +72,9 @@ type toApply struct {
 	snapshot *raftpb.Snapshot
 	// notifyc synchronizes etcd server applies with the raft node
 	notifyc chan struct{}
-	// raftAdvancedC notifies EtcdServer.apply that
-	// 'raftLog.applied' has advanced by r.Advance
-	// it should be used only when entries contain raftpb.EntryConfChange
+	// raftAdvancedC is closed once r.Advance has moved 'raftLog.applied' past
+	// this batch: applyAll waits for it before snapshotting or compacting the
+	// raft log, and a conf change's waiter before it proceeds
 	raftAdvancedC <-chan struct{}
 }
 
@@ -330,10 +330,11 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 				// gofail: var raftBeforeAdvance struct{}
 				r.Advance()
 
-				if confChanged {
-					// notify etcdserver that raft has already been notified or advanced.
-					raftAdvancedC <- struct{}{}
-				}
+				// notify etcdserver that raft has advanced: its applied index now covers
+				// this batch, so the apply loop may snapshot and compact the raft log up
+				// to it (MemoryStorage.Compact must not pass raft's applied index), and a
+				// conf change's waiter may proceed.
+				close(raftAdvancedC)
 			case <-r.stopped:
 				return
 			}

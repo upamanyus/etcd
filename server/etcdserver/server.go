@@ -988,6 +988,16 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 	// storage, since the raft routine might be slower than toApply routine.
 	<-apply.notifyc
 
+	// wait for raft to advance past this batch before snapshotting or compacting:
+	// raft's applied index moves only at Advance, and the raft log must not be
+	// compacted past it (MemoryStorage.Compact); otherwise an election in that
+	// window panics raft ("error scanning unapplied entries").
+	select {
+	case <-apply.raftAdvancedC:
+	case <-s.stopping:
+		return
+	}
+
 	s.snapshotIfNeededAndCompactRaftLog(ep)
 	select {
 	// snapshot requested via send()

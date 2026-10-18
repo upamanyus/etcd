@@ -340,3 +340,64 @@ func TestStopRaftNodeMoreThanOnce(t *testing.T) {
 		}
 	}
 }
+
+// gatedAdvanceNode is a readyNode whose Advance blocks until gate is closed.
+type gatedAdvanceNode struct {
+	*readyNode
+	gate     chan struct{}
+	advanced chan struct{}
+}
+
+func (n *gatedAdvanceNode) Advance() {
+	<-n.gate
+	close(n.advanced)
+}
+
+// TestRaftAdvancedCAfterAdvance checks that raftAdvancedC, which applyAll waits
+// for before it snapshots and compacts the raft log, is signaled for every
+// batch (not only one with a conf change) and only after raft's Advance: the
+// apply loop must not compact the MemoryStorage past raft's applied index,
+// which only Advance moves.
+func TestRaftAdvancedCAfterAdvance(t *testing.T) {
+	n := &gatedAdvanceNode{newNopReadyNode(), make(chan struct{}), make(chan struct{})}
+	r := newRaftNode(raftNodeConfig{
+		lg:          zaptest.NewLogger(t),
+		Node:        n,
+		storage:     mockstorage.NewStorageRecorder(""),
+		raftStorage: raft.NewMemoryStorage(),
+		transport:   newNopTransporter(),
+	})
+	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
+	srv.r.start(&raftReadyHandler{
+		getLead:              func() uint64 { return 0 },
+		updateLead:           func(uint64) {},
+		updateLeadership:     func(bool) {},
+		updateCommittedIndex: func(uint64) {},
+	})
+	defer srv.r.stop()
+
+	n.readyc <- raft.Ready{
+		SoftState:        &raft.SoftState{RaftState: raft.StateFollower},
+		CommittedEntries: []*raftpb.Entry{{Type: raftpb.EntryNormal.Enum(), Index: new(uint64(1))}},
+	}
+	ap := <-srv.r.applyc
+	<-ap.notifyc
+
+	select {
+	case <-ap.raftAdvancedC:
+		t.Fatalf("raftAdvancedC signaled before Advance")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(n.gate)
+	select {
+	case <-ap.raftAdvancedC:
+	case <-time.After(time.Second):
+		t.Fatalf("raftAdvancedC not signaled after Advance of a batch without a conf change")
+	}
+	select {
+	case <-n.advanced:
+	default:
+		t.Fatalf("raftAdvancedC signaled but Advance did not return")
+	}
+}
