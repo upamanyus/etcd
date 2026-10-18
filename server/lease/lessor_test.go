@@ -271,10 +271,7 @@ func TestLessorRenewWithCheckpointer(t *testing.T) {
 
 	le := newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL})
 	fakerCheckerpointer := func(ctx context.Context, cp *pb.LeaseCheckpointRequest) error {
-		for _, cp := range cp.GetCheckpoints() {
-			le.Checkpoint(LeaseID(cp.GetID()), cp.GetRemaining_TTL())
-		}
-		return nil
+		return le.Checkpoint(cp.GetCheckpoints())
 	}
 	defer le.Stop()
 	// Set checkpointer
@@ -593,7 +590,7 @@ func TestLessorCheckpointsRestoredOnPromote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	le.Checkpoint(l.ID, 5)
+	le.Checkpoint([]*pb.LeaseCheckpoint{{ID: int64(l.ID), Remaining_TTL: 5}})
 	le.Promote(0)
 	remaining := l.Remaining().Seconds()
 	if !(remaining > 4 && remaining < 5) {
@@ -656,7 +653,7 @@ func TestLessorCheckpointPersistenceAfterRestart(t *testing.T) {
 			if l.getRemainingTTL() != ttl {
 				t.Errorf("getRemainingTTL() = %d, expected: %d", l.getRemainingTTL(), ttl)
 			}
-			le.Checkpoint(2, checkpointTTL)
+			le.Checkpoint([]*pb.LeaseCheckpoint{{ID: 2, Remaining_TTL: checkpointTTL}})
 			if l.getRemainingTTL() != checkpointTTL {
 				t.Errorf("getRemainingTTL() = %d, expected: %d", l.getRemainingTTL(), checkpointTTL)
 			}

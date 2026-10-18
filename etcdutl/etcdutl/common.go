@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 	"go.etcd.io/etcd/server/v3/lease"
@@ -90,7 +91,7 @@ func (sl *SimpleLessor) Grant(id lease.LeaseID, ttl int64) (*lease.Lease, error)
 
 func (sl *SimpleLessor) Revoke(id lease.LeaseID) error { return nil }
 
-func (sl *SimpleLessor) Checkpoint(id lease.LeaseID, remainingTTL int64) error { return nil }
+func (sl *SimpleLessor) Checkpoint(cps []*pb.LeaseCheckpoint) error { return nil }
 
 func (sl *SimpleLessor) Attach(id lease.LeaseID, items []lease.LeaseItem) error { return nil }
 

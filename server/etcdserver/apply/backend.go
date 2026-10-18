@@ -97,13 +97,8 @@ func (a *applierV3backend) LeaseRevoke(lc *pb.LeaseRevokeRequest) (*pb.LeaseRevo
 }
 
 func (a *applierV3backend) LeaseCheckpoint(lc *pb.LeaseCheckpointRequest) (*pb.LeaseCheckpointResponse, error) {
-	for _, c := range lc.Checkpoints {
-		err := a.options.Lessor.Checkpoint(lease.LeaseID(c.ID), c.Remaining_TTL)
-		if err != nil {
-			return &pb.LeaseCheckpointResponse{Header: a.newHeader()}, err
-		}
-	}
-	return &pb.LeaseCheckpointResponse{Header: a.newHeader()}, nil
+	err := a.options.Lessor.Checkpoint(lc.Checkpoints)
+	return &pb.LeaseCheckpointResponse{Header: a.newHeader()}, err
 }
 
 func (a *applierV3backend) Alarm(ar *pb.AlarmRequest) (*pb.AlarmResponse, error) {
