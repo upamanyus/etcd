@@ -1472,8 +1472,8 @@ func TestV3RangeRequest(t *testing.T) {
 			},
 			[]bool{true, true, true, true, false, false},
 			[]int64{4, 4, 4, 4, 0, 4},
-			// Only ASCEND+KEY (index 0) and SortOrder_NONE (index 5) are supported by RangeStream.
-			[]bool{false, true, true, true, true, false},
+			// Only ASCEND+KEY (index 0) is supported by RangeStream.
+			[]bool{false, true, true, true, true, true},
 		},
 		{
 			"min/max mod rev",

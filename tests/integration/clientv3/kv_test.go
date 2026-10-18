@@ -429,6 +429,47 @@ func TestKVGetStreamCompactedError(t *testing.T) {
 	require.ErrorIsf(t, err, rpctypes.ErrCompacted, "GetStream returned %T %v", err, err)
 }
 
+// TestKVGetStreamSortByCreateRevision ensures GetStream sorted by create
+// revision without an order returns the keys Get returns, or is rejected as
+// unsupported.
+func TestKVGetStreamSortByCreateRevision(t *testing.T) {
+	if integration.ThroughProxy {
+		t.Skip("RangeStream is not supported by the KV client adapter")
+	}
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	kv := clus.RandClient()
+	ctx := t.Context()
+
+	for _, key := range []string{"k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a"} {
+		_, err := kv.Put(ctx, key, "1")
+		require.NoError(t, err)
+	}
+
+	opts := []clientv3.OpOption{clientv3.WithRange("z"), clientv3.WithKeysOnly(), clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortNone)}
+	resp, err := kv.Get(ctx, "a", opts...)
+	require.NoError(t, err)
+	stream, err := kv.GetStream(ctx, "a", opts...)
+	require.NoError(t, err)
+	streamResp, err := clientv3.GetStreamToGetResponse(stream)
+	if status.Code(err) == codes.Unimplemented {
+		return
+	}
+	require.NoError(t, err)
+
+	var keys, streamKeys []string
+	for _, kv := range resp.Kvs {
+		keys = append(keys, string(kv.Key))
+	}
+	for _, kv := range streamResp.Kvs {
+		streamKeys = append(streamKeys, string(kv.Key))
+	}
+	require.Equal(t, keys, streamKeys)
+}
+
 // TestKVGetKeysOnlyWithCountOnly asserts that when a Range operation
 // with both KeysOnly and CountOnly are specified, CountOnly takes precedence.
 func TestKVGetKeysOnlyWithCountOnly(t *testing.T) {

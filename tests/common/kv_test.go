@@ -298,7 +298,7 @@ func clusterSupportsGetStream(ctx context.Context, t *testing.T, clus interfaces
 // rangeStreamSupports reports whether the server's RangeStream RPC accepts a
 // request with these options, mirroring v3rpc.checkRangeStreamRequest.
 func rangeStreamSupports(o config.GetOptions) bool {
-	if !txn.IsDefaultOrdering(
+	if o.SortBy != clientv3.SortByKey || !txn.IsDefaultOrdering(
 		etcdserverpb.RangeRequest_SortTarget(o.SortBy),
 		etcdserverpb.RangeRequest_SortOrder(o.Order),
 	) {
