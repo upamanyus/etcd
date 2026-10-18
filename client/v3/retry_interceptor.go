@@ -78,6 +78,11 @@ func (c *Client) unaryClientInterceptor(optFuncs ...retryOption) grpc.UnaryClien
 					// its the context deadline or cancellation.
 					return lastErr
 				}
+				// A non-repeatable call (a write) may have been applied by this
+				// attempt: retrying it would violate write-at-most-once semantics.
+				if callOpts.retryPolicy == nonRepeatable {
+					return lastErr
+				}
 				// its the callCtx deadline or cancellation, in which case try again.
 				continue
 			}
