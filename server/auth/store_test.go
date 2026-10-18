@@ -28,7 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 
 	"go.etcd.io/etcd/api/v3/authpb"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -1176,4 +1178,18 @@ func TestUserChangePasswordWithOldLog(t *testing.T) {
 	_, err = as.UserChangePassword(&pb.AuthUserChangePasswordRequest{Name: "foo-test", HashedPassword: encodePassword("bar")})
 	require.Errorf(t, err, "expected %v, got %v", ErrUserNotFound, err)
 	require.ErrorIsf(t, err, ErrUserNotFound, "expected %v, got %v", ErrUserNotFound, err)
+}
+
+// TestAuthInfoFromTLSNonTLSPeer checks that a peer whose credentials are not
+// TLS (here insecure credentials) has no TLS identity: AuthInfoFromTLS returns
+// nil, as for a peer without auth info, instead of panicking on the type
+// assertion to credentials.TLSInfo.
+func TestAuthInfoFromTLSNonTLSPeer(t *testing.T) {
+	as := &authStore{lg: zaptest.NewLogger(t)}
+	_, ai, err := insecure.NewCredentials().ServerHandshake(nil)
+	require.NoError(t, err)
+	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: ai})
+	require.NotPanics(t, func() {
+		require.Nil(t, as.AuthInfoFromTLS(ctx))
+	})
 }
