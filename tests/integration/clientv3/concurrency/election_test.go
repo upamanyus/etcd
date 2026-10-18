@@ -103,3 +103,37 @@ func TestResumeElection(t *testing.T) {
 		t.Errorf("expected new leader to be 'candidate1' got %q", string(kv.Value))
 	}
 }
+
+// TestElectionCampaignKeyDeleted ensures that Campaign does not elect a
+// campaigner whose key was deleted while it waited.
+func TestElectionCampaignKeyDeleted(t *testing.T) {
+	const prefix = "/key-deleted"
+
+	cli, err := integration.NewClient(t, clientv3.Config{Endpoints: exampleEndpoints()})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	s1, err := concurrency.NewSession(cli)
+	require.NoError(t, err)
+	defer s1.Close()
+	s2, err := concurrency.NewSession(cli)
+	require.NoError(t, err)
+	defer s2.Close()
+	e1 := concurrency.NewElection(s1, prefix)
+	e2 := concurrency.NewElection(s2, prefix)
+
+	require.NoError(t, e1.Campaign(t.Context(), "e1"))
+	campaigned := make(chan error, 1)
+	go func() { campaigned <- e2.Campaign(t.Context(), "e2") }()
+	require.Eventually(t, func() bool {
+		resp, gerr := cli.Get(t.Context(), prefix+"/", clientv3.WithPrefix())
+		return gerr == nil && len(resp.Kvs) == 2
+	}, 5*time.Second, 10*time.Millisecond, "e2's key is not created")
+
+	// Revoking s2's lease deletes e2's key while e2 waits for e1.
+	_, err = cli.Revoke(t.Context(), s2.Lease())
+	require.NoError(t, err)
+	require.NoError(t, e1.Resign(t.Context()))
+	// e2 is not the leader, since its key is gone.
+	require.Error(t, <-campaigned, "e2 elected after its key was deleted")
+}
