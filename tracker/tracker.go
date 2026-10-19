@@ -426,6 +426,12 @@ func (p *ProgressTracker) ResetReplicationSet(resetSubterm bool) {
 	if !resetSubterm {
 		epoch.Subterm = p.Epoch.Subterm + 1
 	}
+	if p.Witnesses[0] == 0 && p.Witnesses[1] == 0 {
+		// Without a witness the replication sets are never read (HasWitness
+		// and ReplicateToWitness are false): no witness, none excluded.
+		p.Epoch = epoch
+		return
+	}
 
 	for i, c := range p.Voters {
 		set := &epoch.ReplicationSet[i]
