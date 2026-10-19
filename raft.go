@@ -1516,7 +1516,12 @@ func stepLeader(r *raft, m *pb.Message) error {
 			// equals pr.Match we know we don't m.Index+1 in our log, so moving
 			// back to replicating state is not useful; besides pr.PendingSnapshot
 			// would prevent it.
-			if pr.MaybeUpdate(m.GetIndex()) || (pr.Match == m.GetIndex() && pr.State == tracker.StateProbe) {
+			// The shortcut needs the probe to be at the acked index
+			// (pr.Next == pr.Match+1): a voter answers a stale-term MsgApp or
+			// MsgHeartbeat with an empty MsgAppResp of its own term (Index 0,
+			// not a rejection), which acknowledges nothing and must not move a
+			// peer probing at a later index back to Next = 1.
+			if pr.MaybeUpdate(m.GetIndex()) || (pr.Match == m.GetIndex() && pr.State == tracker.StateProbe && pr.Next == pr.Match+1) {
 				switch {
 				case pr.State == tracker.StateProbe:
 					pr.BecomeReplicate()

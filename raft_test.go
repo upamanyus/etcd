@@ -2240,12 +2240,11 @@ func TestLeaderAppResp(t *testing.T) {
 		{3, true, 0, 3, 0, 0, 0},  // stale resp; no replies
 		{2, true, 0, 2, 1, 1, 0},  // denied resp; leader does not commit; decrease next and send probing msg
 		{2, false, 2, 4, 2, 2, 2}, // accept resp; leader commits; broadcast with commit index
-		// Follower is StateProbing at 0, it sends MsgAppResp for 0 (which
-		// matches the pr.Match) so it is moved to StateReplicate and as many
-		// entries as possible are sent to it (1, 2, and 3). Correspondingly the
-		// Next is then 4 (an Entry at 4 does not exist, indicating the follower
-		// will be up to date should it process the emitted MsgApp).
-		{0, false, 0, 4, 1, 0, 0},
+		// Follower is StateProbing at 2 (Next = 3), it sends MsgAppResp for 0
+		// (which matches the pr.Match but not the probe: it is, e.g., the
+		// empty answer to a stale-term MsgApp). It acknowledges nothing, so the
+		// progress is unchanged and nothing is sent.
+		{0, false, 0, 3, 0, 0, 0},
 	}
 
 	for _, tt := range tests {
@@ -2280,6 +2279,57 @@ func TestLeaderAppResp(t *testing.T) {
 				require.Equal(t, tt.wcommitted, msg.GetCommit(), "%v", DescribeMessage(msg, nil))
 			}
 		})
+	}
+}
+
+// TestStaleMsgAppGetsIndexZeroAck: a follower at term 2 answers a stale MsgApp
+// of term 1 (check-quorum on) with an empty MsgAppResp of its own term: Index
+// 0, not a rejection.
+func TestStaleMsgAppGetsIndexZeroAck(t *testing.T) {
+	s := newTestMemoryStorage(withPeers(1, 2, 3))
+	require.NoError(t, s.Append(index(1).terms(1, 1, 1)))
+	r := newTestRaft(2, 10, 1, s)
+	r.checkQuorum = true
+	r.becomeFollower(2, None) // voted in term 2, no leader heard yet
+	require.NoError(t, r.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(1)),
+		Type: pb.MsgApp.Enum(), Index: new(uint64(3)), LogTerm: new(uint64(1))}))
+	msgs := r.readMessages()
+	if len(msgs) != 1 || msgs[0].GetType() != pb.MsgAppResp || msgs[0].GetTo() != 1 ||
+		msgs[0].GetTerm() != 2 || msgs[0].GetIndex() != 0 || msgs[0].GetReject() {
+		t.Fatalf("unexpected response %v", msgs)
+	}
+}
+
+// TestLeaderIndexZeroAckSendsNoSnapshot: a leader of term 2 that has not yet
+// heard from peer 2 (StateProbe, Match 0, Next 4) receives the response of
+// TestStaleMsgAppGetsIndexZeroAck. It acknowledges nothing: the leader must not
+// move 2 to StateReplicate with Next = 1, which, with its log compacted at
+// index 1, would send 2 a MsgSnap although 2 holds the whole log.
+func TestLeaderIndexZeroAckSendsNoSnapshot(t *testing.T) {
+	s := newTestMemoryStorage(withPeers(1, 2, 3))
+	require.NoError(t, s.Append(index(1).terms(1, 1, 1)))
+	s.SetHardState(&pb.HardState{Term: new(uint64(1)), Commit: new(uint64(3))})
+	cs := &pb.ConfState{Voters: []uint64{1, 2, 3}}
+	_, err := s.CreateSnapshot(3, cs, nil)
+	require.NoError(t, err)
+	require.NoError(t, s.Compact(1))
+	r := newTestRaft(1, 10, 1, s)
+	r.checkQuorum = true
+	r.becomeCandidate() // term 2
+	r.becomeLeader()
+	r.readMessages()
+	pr := r.trk.Progress[2]
+	require.Equal(t, tracker.StateProbe, pr.State)
+	require.Equal(t, uint64(0), pr.Match)
+	require.Equal(t, uint64(4), pr.Next)
+	require.NoError(t, r.Step(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Term: new(uint64(2)),
+		Type: pb.MsgAppResp.Enum()}))
+	pr = r.trk.Progress[2]
+	require.Equal(t, tracker.StateProbe, pr.State, "%v", pr)
+	require.Equal(t, uint64(0), pr.Match)
+	require.Equal(t, uint64(4), pr.Next)
+	for _, m := range r.readMessages() {
+		require.NotEqual(t, pb.MsgSnap, m.GetType(), "%v", DescribeMessage(m, nil))
 	}
 }
 
