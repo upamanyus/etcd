@@ -95,9 +95,15 @@ func DescribeSoftState(ss SoftState) string {
 }
 
 func DescribeConfState(state *pb.ConfState) string {
+	// The witness fields are shown only when set, so that a configuration
+	// without a witness is described as before witnesses.
+	var wit string
+	if state.GetWitness() != 0 || state.GetWitnessOutgoing() != 0 {
+		wit = fmt.Sprintf(" Witness:%v WitnessOutgoing:%v", state.GetWitness(), state.GetWitnessOutgoing())
+	}
 	return fmt.Sprintf(
-		"Voters:%v VotersOutgoing:%v Learners:%v LearnersNext:%v Witness:%v WitnessOutgoing:%v AutoLeave:%v",
-		state.Voters, state.VotersOutgoing, state.Learners, state.LearnersNext, state.GetWitness(), state.GetWitnessOutgoing(), state.GetAutoLeave(),
+		"Voters:%v VotersOutgoing:%v Learners:%v LearnersNext:%v%s AutoLeave:%v",
+		state.Voters, state.VotersOutgoing, state.Learners, state.LearnersNext, wit, state.GetAutoLeave(),
 	)
 }
 

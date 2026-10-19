@@ -108,9 +108,8 @@ func (rn *RawNode) ProposeConfChange(cc pb.ConfChangeI) error {
 // ApplyConfChange applies a config change to the local node. The app must call
 // this when it applies a configuration change, except when it decides to reject
 // the configuration change, in which case no call must take place.
-func (rn *RawNode) ApplyConfChange(cc pb.ConfChangeI) (*pb.ConfState, error) {
-	cs, err := rn.raft.applyConfChange(cc.AsV2())
-	return cs, err
+func (rn *RawNode) ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState {
+	return rn.raft.applyConfChange(cc.AsV2())
 }
 
 // Step advances the state machine using the given message.

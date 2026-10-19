@@ -268,6 +268,12 @@ func (c Changer) makeWitness(cfg *tracker.Config, trk tracker.ProgressMap, id ui
 		return fmt.Errorf("cannot change non-witness voter/learner to witness")
 	}
 
+	// The witness is tracked already: it may be a voter in the outgoing config
+	// only (Restore replays the incoming config after removing the outgoing
+	// voters), so add it back to the incoming config, as makeVoter does.
+	incoming(cfg.Voters)[id] = struct{}{}
+	cfg.Witnesses[0] = id
+
 	return nil
 }
 

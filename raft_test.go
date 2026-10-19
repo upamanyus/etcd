@@ -421,9 +421,6 @@ func TestLearnerPromotion(t *testing.T) {
 	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgBeat.Enum()})
 
 	n1.applyConfChange((&pb.ConfChange{NodeId: new(uint64(2)), Type: pb.ConfChangeAddNode.Enum()}).AsV2())
-	n1.advanceMessagesAfterAppend() // empty entry will be added in leader log after config change
-	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgBeat.Enum()})
-
 	n2.applyConfChange((&pb.ConfChange{NodeId: new(uint64(2)), Type: pb.ConfChangeAddNode.Enum()}).AsV2())
 	assert.False(t, n2.isLearner)
 
@@ -2963,9 +2960,11 @@ func TestRemoveNode(t *testing.T) {
 	w := []uint64{1}
 	assert.Equal(t, w, r.trk.VoterNodes())
 
-	_, err := r.applyConfChange((&pb.ConfChange{NodeId: new(uint64(1)), Type: pb.ConfChangeRemoveNode.Enum()}).AsV2())
-	// Removing the remaining voter will return error "removed all voters".
-	require.EqualError(t, err, "removed all voters")
+	// Removing the remaining voter will panic.
+	defer func() {
+		assert.NotNil(t, recover(), "did not panic")
+	}()
+	r.applyConfChange((&pb.ConfChange{NodeId: new(uint64(1)), Type: pb.ConfChangeRemoveNode.Enum()}).AsV2())
 }
 
 // TestRemoveLearner tests that removeNode could update nodes and
@@ -2979,9 +2978,11 @@ func TestRemoveLearner(t *testing.T) {
 	w = nil
 	assert.Equal(t, w, r.trk.LearnerNodes())
 
-	_, err := r.applyConfChange((&pb.ConfChange{NodeId: new(uint64(1)), Type: pb.ConfChangeRemoveNode.Enum()}).AsV2())
-	// Removing the remaining voter will return error "removed all voters".
-	require.EqualError(t, err, "removed all voters")
+	// Removing the remaining voter will panic.
+	defer func() {
+		assert.NotNil(t, recover(), "did not panic")
+	}()
+	r.applyConfChange((&pb.ConfChange{NodeId: new(uint64(1)), Type: pb.ConfChangeRemoveNode.Enum()}).AsV2())
 }
 
 func TestPromotable(t *testing.T) {
@@ -3094,11 +3095,9 @@ func TestCommitAfterRemoveNode(t *testing.T) {
 	// pending command can now commit.
 	r.applyConfChange(cc.AsV2())
 	ents = nextEnts(r, s)
-	require.Len(t, ents, 2)
+	require.Len(t, ents, 1)
 	require.Equal(t, pb.EntryNormal, ents[0].GetType())
 	require.Equal(t, []byte("hello"), ents[0].GetData())
-	require.Equal(t, pb.EntryNormal, ents[1].GetType())
-	require.Empty(t, ents[1].GetData())
 }
 
 // TestLeaderTransferToUpToDateNode verifies transferring should succeed

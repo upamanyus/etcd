@@ -449,6 +449,9 @@ type raft struct {
 	traceLogger TraceLogger
 
 	witnessMsgs []WitnessMessage
+	// witnessVoteAsked holds the witnesses asked for their vote in the current
+	// campaign: a candidate asks each witness at most once.
+	witnessVoteAsked map[uint64]bool
 }
 
 func newRaft(c *Config) *raft {
@@ -745,7 +748,13 @@ func (r *raft) getWitnessVoteRequestReadiness(votesToWin [2]int) map[uint64]bool
 }
 
 func (r *raft) sendRequestVoteToWitness(ctx []byte, witnessID uint64, voteType pb.MessageType, term uint64) {
-	lastEntry := r.raftLog.lastEntry()
+	last := r.raftLog.lastEntryID()
+	// The subterm of a last entry behind a snapshot is not known: report 0. A
+	// subterm lower than the entry's only makes the witness less likely to vote.
+	_, subterm, ok := r.raftLog.subterm(last.index)
+	if !ok {
+		subterm = 0
+	}
 	votes := r.trk.Votes
 	v := make(map[uint64]bool)
 	for id := range votes {
@@ -758,41 +767,34 @@ func (r *raft) sendRequestVoteToWitness(ctx []byte, witnessID uint64, voteType p
 		To:             witnessID,
 		Type:           voteType,
 		Term:           term,
-		LastLogTerm:    lastEntry.GetTerm(),
-		LastLogSubterm: lastEntry.GetSubterm(),
-		LastLogIndex:   lastEntry.GetIndex(),
+		LastLogTerm:    last.term,
+		LastLogSubterm: subterm,
+		LastLogIndex:   last.index,
 		Votes:          v,
 	})
 
 	r.logger.Infof("%x [logterm: %d, logsubterm: %d] sent %s request to witness %x at term %d. Message term: %d",
-		r.id, lastEntry.GetTerm(), lastEntry.GetSubterm(), voteType, witnessID, r.Term, term)
+		r.id, last.term, subterm, voteType, witnessID, r.Term, term)
 }
 
-func (r *raft) sendAppendToWitness(witnessID uint64, index uint64) {
+// sendAppendToWitness sends the witness the entry at index, of the leader's
+// term and current subterm, with the current replication set.
+func (r *raft) sendAppendToWitness(witnessID uint64, index uint64, subterm uint64) {
 	epoch := r.trk.Epoch
-	if epoch == nil {
-		return
-	}
-
-	entries, err := r.raftLog.entries(index, 0)
-	if err != nil {
-		return
-	}
-
 	msg := WitnessMessage{
 		From:           r.id,
 		To:             witnessID,
 		Type:           pb.MsgApp,
 		Term:           r.Term,
-		LastLogTerm:    entries[0].GetTerm(),
-		LastLogSubterm: entries[0].GetSubterm(),
-		LastLogIndex:   entries[0].GetIndex(),
+		LastLogTerm:    r.Term,
+		LastLogSubterm: subterm,
+		LastLogIndex:   index,
 		ReplicationSet: [2][]uint64{epoch.ReplicationSet[0].GetNonWitnessVoterSlice(), epoch.ReplicationSet[1].GetNonWitnessVoterSlice()},
 	}
 
 	r.witnessMsgs = append(r.witnessMsgs, msg)
 	r.logger.Infof("%x [logterm: %d, logsubterm: %d] sent %s request to witness %x at term %d",
-		r.id, entries[0].GetTerm(), entries[0].GetSubterm(), pb.MsgApp, witnessID, r.Term)
+		r.id, r.Term, subterm, pb.MsgApp, witnessID, r.Term)
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -883,15 +885,17 @@ func (r *raft) appliedSnap(snap *pb.Snapshot) {
 // only be called in StateLeader.
 func (r *raft) maybeCommit() bool {
 	defer traceCommit(r)
-	r.trk.Committed()
-	// check if we can commit on q-1 acks in current set
+	// Send the witness the largest entry of the current term and subterm that
+	// quorum-1 voters of the replication set have acknowledged: with the
+	// witness's acknowledgement it is committed.
 	idxMap := r.trk.OneLessThanQuorumInReplicationSet()
 	for w, wci := range idxMap {
-		if wci > 0 {
-			e := r.raftLog.entry(uint64(wci))
-			if e.GetTerm() == r.Term && e.GetSubterm() == r.trk.Epoch.Subterm {
-				r.sendAppendToWitness(w, uint64(wci))
-			}
+		if wci == 0 {
+			continue
+		}
+		t, st, ok := r.raftLog.subterm(uint64(wci))
+		if ok && t == r.Term && st == r.trk.Epoch.Subterm {
+			r.sendAppendToWitness(w, uint64(wci), st)
 		}
 	}
 
@@ -905,6 +909,7 @@ func (r *raft) reset(term uint64) {
 	}
 
 	r.lead = None
+	r.witnessVoteAsked = nil
 
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
@@ -1833,7 +1838,11 @@ func stepCandidate(r *raft, m *pb.Message) error {
 		r.handleSnapshot(m)
 	case myVoteRespType:
 		gr, rj, res, rv := r.pollAndReportDiff(m.GetFrom(), m.GetType(), !m.GetReject())
-		r.logger.Infof("%x has received %d %s votes and %d vote rejections. It needs %d votes to win", r.id, gr, m.GetType(), rj, rv)
+		if r.trk.Witnesses[0] != 0 || r.trk.Witnesses[1] != 0 {
+			r.logger.Infof("%x has received %d %s votes and %d vote rejections. It needs %d votes to win", r.id, gr, m.GetType(), rj, rv)
+		} else {
+			r.logger.Infof("%x has received %d %s votes and %d vote rejections", r.id, gr, m.GetType(), rj)
+		}
 		switch res {
 		case quorum.VoteWon:
 			if r.state == StatePreCandidate {
@@ -1850,7 +1859,11 @@ func stepCandidate(r *raft, m *pb.Message) error {
 		case quorum.VotePending:
 			witnessReadyToVote := r.getWitnessVoteRequestReadiness(rv)
 			for witnessID, ready := range witnessReadyToVote {
-				if ready {
+				if ready && !r.witnessVoteAsked[witnessID] {
+					if r.witnessVoteAsked == nil {
+						r.witnessVoteAsked = map[uint64]bool{}
+					}
+					r.witnessVoteAsked[witnessID] = true
 					// try to get vote from witness
 					var myVoteType pb.MessageType
 					var term uint64
@@ -2104,7 +2117,7 @@ func (r *raft) promotable() bool {
 	return pr != nil && !pr.IsLearner && !pr.IsWitness && !r.raftLog.hasNextOrInProgressSnapshot()
 }
 
-func (r *raft) applyConfChange(cc *pb.ConfChangeV2) (*pb.ConfState, error) {
+func (r *raft) applyConfChange(cc *pb.ConfChangeV2) *pb.ConfState {
 	cfg, trk, err := func() (tracker.Config, tracker.ProgressMap, error) {
 		changer := confchange.Changer{
 			Tracker:   r.trk,
@@ -2119,12 +2132,11 @@ func (r *raft) applyConfChange(cc *pb.ConfChangeV2) (*pb.ConfState, error) {
 	}()
 
 	if err != nil {
-		return nil, err
+		// TODO(tbg): return the error to the caller.
+		panic(err)
 	}
 
-	c := r.switchToConfig(cfg, trk)
-
-	return c, nil
+	return r.switchToConfig(cfg, trk)
 }
 
 // switchToConfig reconfigures this node to use the provided configuration. It
@@ -2139,7 +2151,11 @@ func (r *raft) switchToConfig(cfg tracker.Config, trk tracker.ProgressMap) *pb.C
 	r.trk.Config = cfg
 	r.trk.Progress = trk
 
-	if r.state == StateLeader {
+	// A configuration change that involves a witness (in the new configuration,
+	// or in the replication set of the old one) starts a new subterm: the
+	// replication set of a subterm is one of the subterm's configuration. A
+	// change between configurations without a witness changes nothing.
+	if r.state == StateLeader && (r.trk.Witnesses[0] != 0 || r.trk.Witnesses[1] != 0 || r.trk.Epoch.HasWitness()) {
 		r.maybeStartNewSubterm(false, true)
 	}
 
@@ -2288,7 +2304,9 @@ func (r *raft) reduceUncommittedSize(s entryPayloadSize) {
 func (r *raft) maybeStartNewSubterm(newTerm bool, confChange bool) bool {
 	if newTerm || confChange {
 		r.trk.ResetReplicationSet(newTerm)
-		r.logger.Infof("%x resets replication set to %s, %s", r.id, r.trk.Epoch.ReplicationSet[0].String(), r.trk.Epoch.ReplicationSet[1].String())
+		if r.trk.Epoch.HasWitness() {
+			r.logger.Infof("%x resets replication set to %s, %s", r.id, r.trk.Epoch.ReplicationSet[0].String(), r.trk.Epoch.ReplicationSet[1].String())
+		}
 	} else {
 		if r.trk.ChangeReplicationSet() {
 			r.logger.Infof("%x changes replication set to %s, %s", r.id, r.trk.Epoch.ReplicationSet[0].String(), r.trk.Epoch.ReplicationSet[1].String())
@@ -2303,7 +2321,9 @@ func (r *raft) maybeStartNewSubterm(newTerm bool, confChange bool) bool {
 		r.logger.Panic("empty entry was dropped")
 	}
 
-	r.logger.Infof("%x starts new subterm. Term: %d, Subterm: %d", r.id, r.Term, r.trk.Epoch.Subterm)
+	if r.trk.Epoch.HasWitness() {
+		r.logger.Infof("%x starts new subterm. Term: %d, Subterm: %d", r.id, r.Term, r.trk.Epoch.Subterm)
+	}
 	return true
 }
 

@@ -113,6 +113,9 @@ type Ready struct {
 	// written to disk or if a non-durable write is permissible.
 	MustSync bool
 
+	// WitnessMessages specifies outbound messages to the witness. The
+	// application delivers each to its Witness (Process) and steps the
+	// response, if any, into this node.
 	WitnessMessages []WitnessMessage
 }
 
@@ -186,7 +189,7 @@ type Node interface {
 	//
 	// Returns an opaque non-nil ConfState protobuf which must be recorded in
 	// snapshots.
-	ApplyConfChange(cc pb.ConfChangeI) (*pb.ConfState, error)
+	ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState
 
 	// TransferLeadership attempts to transfer leadership to the given transferee.
 	TransferLeadership(ctx context.Context, lead, transferee uint64)
@@ -296,17 +299,12 @@ type msgWithResult struct {
 	result chan error
 }
 
-type confStateWithResult struct {
-	cs     *pb.ConfState
-	result error
-}
-
 // node is the canonical implementation of the Node interface
 type node struct {
 	propc      chan msgWithResult
 	recvc      chan *pb.Message
 	confc      chan *pb.ConfChangeV2
-	confstatec chan confStateWithResult
+	confstatec chan *pb.ConfState
 	readyc     chan Ready
 	advancec   chan struct{}
 	tickc      chan struct{}
@@ -322,7 +320,7 @@ func newNode(rn *RawNode) node {
 		propc:      make(chan msgWithResult),
 		recvc:      make(chan *pb.Message),
 		confc:      make(chan *pb.ConfChangeV2),
-		confstatec: make(chan confStateWithResult),
+		confstatec: make(chan *pb.ConfState),
 		readyc:     make(chan Ready),
 		advancec:   make(chan struct{}),
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
@@ -407,39 +405,35 @@ func (n *node) run() {
 			r.Step(m)
 		case cc := <-n.confc:
 			_, okBefore := r.trk.Progress[r.id]
-			cs, err := r.applyConfChange(cc)
-			if err != nil {
-				r.logger.Warningf("raft.node: %x failed to apply conf change. Error: %s", r.id, err.Error())
-			} else {
-				// If the node was removed, block incoming proposals. Note that we
-				// only do this if the node was in the config before. Nodes may be
-				// a member of the group without knowing this (when they're catching
-				// up on the log and don't have the latest config) and we don't want
-				// to block the proposal channel in that case.
-				//
-				// NB: propc is reset when the leader changes, which, if we learn
-				// about it, sort of implies that we got readded, maybe? This isn't
-				// very sound and likely has bugs.
-				if _, okAfter := r.trk.Progress[r.id]; okBefore && !okAfter {
-					var found bool
-					for _, sl := range [][]uint64{cs.Voters, cs.VotersOutgoing} {
-						for _, id := range sl {
-							if id == r.id {
-								found = true
-								break
-							}
-						}
-						if found {
+			cs := r.applyConfChange(cc)
+			// If the node was removed, block incoming proposals. Note that we
+			// only do this if the node was in the config before. Nodes may be
+			// a member of the group without knowing this (when they're catching
+			// up on the log and don't have the latest config) and we don't want
+			// to block the proposal channel in that case.
+			//
+			// NB: propc is reset when the leader changes, which, if we learn
+			// about it, sort of implies that we got readded, maybe? This isn't
+			// very sound and likely has bugs.
+			if _, okAfter := r.trk.Progress[r.id]; okBefore && !okAfter {
+				var found bool
+				for _, sl := range [][]uint64{cs.Voters, cs.VotersOutgoing} {
+					for _, id := range sl {
+						if id == r.id {
+							found = true
 							break
 						}
 					}
-					if !found {
-						propc = nil
+					if found {
+						break
 					}
+				}
+				if !found {
+					propc = nil
 				}
 			}
 			select {
-			case n.confstatec <- confStateWithResult{cs: cs, result: err}:
+			case n.confstatec <- cs:
 			case <-n.done:
 			}
 		case <-n.tickc:
@@ -571,8 +565,8 @@ func (n *node) Advance() {
 	}
 }
 
-func (n *node) ApplyConfChange(cc pb.ConfChangeI) (*pb.ConfState, error) {
-	var cs confStateWithResult
+func (n *node) ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState {
+	var cs *pb.ConfState
 	select {
 	case n.confc <- cc.AsV2():
 	case <-n.done:
@@ -581,7 +575,7 @@ func (n *node) ApplyConfChange(cc pb.ConfChangeI) (*pb.ConfState, error) {
 	case cs = <-n.confstatec:
 	case <-n.done:
 	}
-	return cs.cs, cs.result
+	return cs
 }
 
 func (n *node) Status() Status {

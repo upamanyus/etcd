@@ -308,16 +308,18 @@ func (l *raftLog) firstIndex() uint64 {
 	return index
 }
 
-func (l *raftLog) entry(i uint64) *pb.Entry {
-	ents, err := l.entries(i, noLimit)
-	if err != nil {
-		panic(err)
+// subterm returns the term and subterm of the entry at index i, and false if
+// the entry is not in the log (compacted, or past the last index): the subterm
+// of an entry behind a snapshot is not known.
+func (l *raftLog) subterm(i uint64) (uint64, uint64, bool) {
+	if i < l.firstIndex() || i > l.lastIndex() {
+		return 0, 0, false
 	}
-	return ents[0]
-}
-func (l *raftLog) lastEntry() *pb.Entry {
-	idx := l.lastIndex()
-	return l.entry(idx)
+	ents, err := l.slice(i, i+1, noLimit)
+	if err != nil || len(ents) == 0 {
+		return 0, 0, false
+	}
+	return ents[0].GetTerm(), ents[0].GetSubterm(), true
 }
 
 func (l *raftLog) lastIndex() uint64 {

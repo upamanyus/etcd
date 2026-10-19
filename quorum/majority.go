@@ -169,6 +169,10 @@ func (c MajorityConfig) OneLessThanQuorum(l AckedIndexer) Index {
 		// MajorityConfig, should behave like the other half.
 		return math.MaxUint64
 	}
+	if n == 1 {
+		// Quorum - 1 is no voter: report no index.
+		return 0
+	}
 
 	// Use an on-stack slice to collect the committed indexes when n <= 7
 	// (otherwise we alloc). The alternative is to stash a slice on

@@ -98,6 +98,9 @@ func (w *witness) Process(m WitnessMessage) (*raftpb.Message, error) {
 			if err != nil {
 				return nil, err
 			}
+			// The update took: st is the witness's state now. (Answering later
+			// requests from it is the leader's shortcut replication.)
+			w.state = st
 			return resp, nil
 		}
 	}
@@ -135,7 +138,7 @@ func (w *witness) processNoUpdate(m WitnessMessage) (*raftpb.Message, bool) {
 func (w *witness) processMessageWithOlderTerm(m WitnessMessage) *raftpb.Message {
 	var resp *raftpb.Message
 	if (w.checkQuorum || w.preVote) && (m.Type == raftpb.MsgHeartbeat || m.Type == raftpb.MsgApp) {
-		resp = &raftpb.Message{To: new(m.From), Type: raftpb.MsgAppResp.Enum()}
+		resp = &raftpb.Message{To: new(m.From), From: new(w.id), Term: new(w.state.GetState().GetTerm()), Type: raftpb.MsgAppResp.Enum()}
 	} else if m.Type == raftpb.MsgPreVote {
 		resp = &raftpb.Message{To: new(m.From), Term: new(w.state.GetState().GetTerm()), Type: raftpb.MsgPreVoteResp.Enum(), Reject: new(true)}
 	} else {
