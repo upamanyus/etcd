@@ -127,6 +127,20 @@ func TestWitnessOlderTermResponse(t *testing.T) {
 	require.Equal(t, uint64(5), resp.GetTerm())
 }
 
+// The witness's acknowledgement of a request that raised its term carries the
+// new term, so that the leader does not drop it as stale.
+func TestWitnessAppendNewerTermResponse(t *testing.T) {
+	st := &memWitnessStorage{state: &pb.WitnessHardState{State: &pb.HardState{Term: new(uint64(1))}}}
+	w := NewWitness(WitnessConfig{ID: 3, Storage: st})
+	resp, err := w.Process(WitnessMessage{Type: pb.MsgApp, From: 1, To: 3, Term: 2,
+		LastLogTerm: 2, LastLogSubterm: 1, LastLogIndex: 7, ReplicationSet: [2][]uint64{{1}, nil}})
+	require.NoError(t, err)
+	require.Equal(t, pb.MsgAppResp, resp.GetType())
+	require.Equal(t, uint64(2), resp.GetTerm())
+	require.Equal(t, uint64(7), resp.GetIndex())
+	require.False(t, resp.GetReject())
+}
+
 // witnessCluster is two regular nodes (1 and 2) and the witness 3, each regular
 // node with its own Witness on the shared witness storage.
 type witnessCluster struct {

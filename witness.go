@@ -229,10 +229,12 @@ func (w *witness) handleAppend(m WitnessMessage, st *raftpb.WitnessHardState) *r
 	st.ReplicationSetOutgoing = m.ReplicationSet[1]
 
 	return &raftpb.Message{
-		Type:  raftpb.MsgAppResp.Enum(),
-		To:    new(m.From),
-		From:  new(w.id),
-		Term:  new(w.state.GetState().GetTerm()),
+		Type: raftpb.MsgAppResp.Enum(),
+		To:   new(m.From),
+		From: new(w.id),
+		// st's term: m.Term (a request of a newer term raised it); the term of
+		// the state before the update would be stale to the leader.
+		Term:  new(st.GetState().GetTerm()),
 		Index: new(st.GetLastLogIndex()),
 	}
 }
