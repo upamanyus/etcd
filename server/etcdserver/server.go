@@ -1094,19 +1094,6 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	s.bemu.Unlock()
 	bemuUnlocked = true
 
-	// Closing old backend might block until all the txns
-	// on the backend are finished.
-	// We do not want to wait on closing the old backend.
-	go func() {
-		lg.Info("closing old backend file")
-		defer func() {
-			lg.Info("closed old backend file")
-		}()
-		if err := oldbe.Close(); err != nil {
-			lg.Panic("failed to close old backend", zap.Error(err))
-		}
-	}()
-
 	lg.Info("restoring alarm store")
 
 	if err := s.restoreAlarms(); err != nil {
@@ -1124,6 +1111,21 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	}
 
 	s.cluster.SetBackend(schema.NewMembershipBackend(lg, newbe))
+
+	// Close the old backend only after the auth store has moved to the new
+	// one: permission checks read the auth store outside the apply loop.
+	// Closing old backend might block until all the txns
+	// on the backend are finished.
+	// We do not want to wait on closing the old backend.
+	go func() {
+		lg.Info("closing old backend file")
+		defer func() {
+			lg.Info("closed old backend file")
+		}()
+		if err := oldbe.Close(); err != nil {
+			lg.Panic("failed to close old backend", zap.Error(err))
+		}
+	}()
 
 	lg.Info("restoring cluster configuration")
 

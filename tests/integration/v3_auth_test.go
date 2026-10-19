@@ -668,3 +668,50 @@ func TestV3AuthWatchErrorAndWatchId0(t *testing.T) {
 
 	<-watchEndCh
 }
+
+// TestV3AuthSerializableGetDuringSnapshotRestore ensures that a member with auth
+// enabled keeps serving serializable reads while it restores a snapshot from the leader.
+func TestV3AuthSerializableGetDuringSnapshotRestore(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, SnapshotCount: 10, SnapshotCatchUpEntries: 5})
+	defer clus.Terminate(t)
+
+	lead := clus.WaitLeader(t)
+	authSetupRoot(t, integration.ToGRPC(clus.Client(lead)).Auth)
+
+	follower := clus.Members[(lead+1)%3]
+	others := []*integration.Member{clus.Members[lead], clus.Members[(lead+2)%3]}
+	lc, err := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(lead).Endpoints(), Username: "root", Password: "123"})
+	require.NoError(t, err)
+	defer lc.Close()
+	fc, err := integration.NewClient(t, clientv3.Config{Endpoints: follower.Client.Endpoints(), Username: "root", Password: "123"})
+	require.NoError(t, err)
+	defer fc.Close()
+	_, err = fc.Get(t.Context(), "foo", clientv3.WithSerializable())
+	require.NoError(t, err)
+
+	// to trigger snapshot from the leader to the partitioned follower
+	follower.InjectPartition(t, others...)
+	for i := 0; i < 40; i++ {
+		_, err = lc.Put(t.Context(), "foo", "bar")
+		require.NoError(t, err)
+	}
+	oldBackend := follower.Server.Backend()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				fc.Get(ctx, "foo", clientv3.WithSerializable())
+			}
+		})
+	}
+	follower.RecoverPartition(t, others...)
+	// a linearizable read returns after the follower has applied the snapshot
+	_, err = fc.Get(t.Context(), "foo")
+	require.NoError(t, err)
+	cancel()
+	wg.Wait()
+	require.NotSame(t, oldBackend, follower.Server.Backend(), "the follower did not restore a snapshot")
+}

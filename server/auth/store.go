@@ -250,6 +250,10 @@ type authStore struct {
 	enabled   bool
 	enabledMu sync.RWMutex
 
+	// beMu guards be against the permission checks, which run outside
+	// the apply loop, while Recover replaces it.
+	beMu sync.RWMutex
+
 	// rangePermCache needs to be protected by rangePermCacheMu
 	// rangePermCacheMu needs to be write locked only in initialization phase or configuration changes
 	// Hot paths like Range(), needs to acquire read lock for improving performance
@@ -367,8 +371,7 @@ func (as *authStore) CheckPassword(username, password string) (uint64, error) {
 	// CompareHashAndPassword is very expensive, so we use closures
 	// to avoid putting it in the critical section of the tx lock.
 	revision, err := func() (uint64, error) {
-		tx := as.be.ReadTx()
-		tx.RLock()
+		tx := as.lockedReadTx()
 		defer tx.RUnlock()
 
 		user = tx.UnsafeGetUser(username)
@@ -394,7 +397,9 @@ func (as *authStore) CheckPassword(username, password string) (uint64, error) {
 }
 
 func (as *authStore) Recover(be AuthBackend) {
+	as.beMu.Lock()
 	as.be = be
+	as.beMu.Unlock()
 	tx := be.ReadTx()
 	tx.RLock()
 
@@ -876,8 +881,7 @@ func (as *authStore) isOpPermitted(userName string, revision uint64, key, rangeE
 		return ErrAuthOldRevision
 	}
 
-	tx := as.be.ReadTx()
-	tx.RLock()
+	tx := as.lockedReadTx()
 	defer tx.RUnlock()
 
 	user := tx.UnsafeGetUser(userName)
@@ -918,8 +922,7 @@ func (as *authStore) IsAdminPermitted(authInfo *AuthInfo) error {
 		return ErrUserEmpty
 	}
 
-	tx := as.be.ReadTx()
-	tx.RLock()
+	tx := as.lockedReadTx()
 	defer tx.RUnlock()
 	u := tx.UnsafeGetUser(authInfo.Username)
 
@@ -932,6 +935,17 @@ func (as *authStore) IsAdminPermitted(authInfo *AuthInfo) error {
 	}
 
 	return nil
+}
+
+// lockedReadTx returns a read transaction of the current backend, locked
+// before Recover can replace that backend: the server closes a replaced
+// backend only after Recover, and closing waits for read transactions to unlock.
+func (as *authStore) lockedReadTx() AuthReadTx {
+	as.beMu.RLock()
+	defer as.beMu.RUnlock()
+	tx := as.be.ReadTx()
+	tx.RLock()
+	return tx
 }
 
 func (as *authStore) IsAuthEnabled() bool {
