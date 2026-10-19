@@ -447,7 +447,9 @@ func (p *ProgressTracker) ResetReplicationSet(resetSubterm bool) {
 
 func (p *ProgressTracker) ChangeReplicationSet() bool {
 	epoch := p.Epoch
-	if epoch == nil {
+	if epoch == nil || !epoch.HasWitness() {
+		// Without a witness the replication set is the configuration's voters,
+		// always.
 		return false
 	}
 
