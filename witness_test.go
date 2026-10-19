@@ -151,13 +151,15 @@ type witnessCluster struct {
 	ws      *memWitnessStorage
 	down    map[uint64]bool
 	applied map[uint64][][]byte
+	cut     bool // the network between 1 and 2 is cut (the witness storage is reachable)
+	reads   map[uint64][]ReadState
 }
 
 func newWitnessCluster(t *testing.T) *witnessCluster {
 	c := &witnessCluster{
 		t: t, nodes: map[uint64]*RawNode{}, stores: map[uint64]*MemoryStorage{},
 		wits: map[uint64]Witness{}, ws: &memWitnessStorage{}, down: map[uint64]bool{},
-		applied: map[uint64][][]byte{},
+		applied: map[uint64][][]byte{}, reads: map[uint64][]ReadState{},
 	}
 	for _, id := range []uint64{1, 2} {
 		s := NewMemoryStorage()
@@ -196,8 +198,9 @@ func (c *witnessCluster) settle() {
 				}
 			}
 			var resps []*pb.Message
+			c.reads[id] = append(c.reads[id], rd.ReadStates...)
 			for _, m := range rd.Messages {
-				if !c.down[m.GetTo()] {
+				if !c.down[m.GetTo()] && !c.cut {
 					resps = append(resps, m)
 				}
 			}
@@ -307,4 +310,47 @@ func TestWitnessClusterCommitAndSafety(t *testing.T) {
 		require.True(t, c.hasApplied(1, []byte(d)), d)
 		require.True(t, c.hasApplied(2, []byte(d)), d)
 	}
+}
+
+// A leader cut off from the other node, but not from the witness's storage, must not confirm
+// a read-index request with the witness's heartbeat response after the other node was elected
+// in a newer term (with the witness's vote) and committed a write. raft#168's witness proxy
+// answered the heartbeat from its cached state, so the read was answered at an index that
+// missed the write; the witness now reads its storage for every heartbeat.
+func TestWitnessStaleReadIndex(t *testing.T) {
+	c := newWitnessCluster(t)
+	require.NoError(t, c.nodes[1].Campaign())
+	c.settle()
+	require.Equal(t, uint64(1), c.leader())
+	require.NoError(t, c.nodes[1].Propose([]byte("a")))
+	c.settle()
+	require.True(t, c.hasApplied(2, []byte("a")))
+
+	// The network between 1 and 2 is cut. Node 2 times out and is elected in term 2 with
+	// the witness's vote, then commits x with the witness (after replacing 1 in its
+	// replication set at check-quorum).
+	c.cut = true
+	for range 100 {
+		if c.nodes[2].raft.state == StateLeader {
+			break
+		}
+		c.tick(2, 1)
+	}
+	require.Equal(t, StateLeader, c.nodes[2].raft.state)
+	require.Equal(t, uint64(2), c.nodes[2].raft.Term)
+	c.tick(2, 25)
+	require.Equal(t, StateLeader, c.nodes[2].raft.state)
+	require.NoError(t, c.nodes[2].Propose([]byte("x")))
+	c.settle()
+	require.True(t, c.hasApplied(2, []byte("x")), "x committed in term 2")
+
+	// Node 1 still leads term 1 (it has not run a check-quorum since the cut). A read-index
+	// request at node 1 must not be confirmed without x: the witness answers its heartbeat
+	// with term 2, and node 1 steps down.
+	require.Equal(t, StateLeader, c.nodes[1].raft.state)
+	c.nodes[1].ReadIndex([]byte("r"))
+	c.settle()
+	require.True(t, len(c.reads[1]) == 0 || c.hasApplied(1, []byte("x")),
+		"node 1 answered a read at index %v without x", c.reads[1])
+	require.NotEqual(t, StateLeader, c.nodes[1].raft.state, "node 1 learned of term 2")
 }

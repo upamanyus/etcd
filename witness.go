@@ -71,6 +71,9 @@ func (w *witness) Process(m WitnessMessage) (*raftpb.Message, error) {
 			return nil, err
 		}
 		w.state = state.GetState()
+		if m.Type == raftpb.MsgHeartbeat && m.Term == w.state.GetState().GetTerm() {
+			return w.handleHeartbeat(m), nil
+		}
 
 		resp, handled = w.processNoUpdate(m)
 		if handled {
@@ -124,9 +127,6 @@ func (w *witness) processNoUpdate(m WitnessMessage) (*raftpb.Message, bool) {
 	handled := false
 	if m.Term == w.state.GetState().GetTerm() {
 		switch m.Type {
-		case raftpb.MsgHeartbeat:
-			resp = w.handleHeartbeat(m)
-			handled = true
 		case raftpb.MsgApp:
 			resp, handled = w.handleAppendNoUpdate(m)
 		}
