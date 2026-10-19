@@ -1002,8 +1002,11 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 	select {
 	// snapshot requested via send()
 	case m := <-s.r.msgSnapC:
-		merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState)
-		s.sendMergedSnap(merged)
+		// drop it unless raft is still at its term: the applied content must not be newer than m's term
+		if m.GetTerm() == apply.raftTerm {
+			merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState)
+			s.sendMergedSnap(merged)
+		}
 	default:
 	}
 }

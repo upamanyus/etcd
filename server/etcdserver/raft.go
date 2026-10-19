@@ -76,6 +76,9 @@ type toApply struct {
 	// this batch: applyAll waits for it before snapshotting or compacting the
 	// raft log, and a conf change's waiter before it proceeds
 	raftAdvancedC <-chan struct{}
+	// raftTerm is the term of the latest HardState raft has handed out, up
+	// to this batch: applyAll merges a queued MsgSnap only at this term
+	raftTerm uint64
 }
 
 type raftNode struct {
@@ -177,6 +180,7 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 	go func() {
 		defer r.onStop()
 		islead := false
+		raftTerm := uint64(0)
 
 		for {
 			select {
@@ -215,6 +219,9 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 						return
 					}
 				}
+				if !raft.IsEmptyHardState(rd.HardState) {
+					raftTerm = rd.HardState.GetTerm()
+				}
 				committedEntries := rd.CommittedEntries
 				notifyc := make(chan struct{}, 1)
 				raftAdvancedC := make(chan struct{}, 1)
@@ -224,6 +231,7 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 					snapshot:      proto.Clone(rd.Snapshot).(*raftpb.Snapshot),
 					notifyc:       notifyc,
 					raftAdvancedC: raftAdvancedC,
+					raftTerm:      raftTerm,
 				}
 
 				updateCommittedIndex(&ap, rh)
