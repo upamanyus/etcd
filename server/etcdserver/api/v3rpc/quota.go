@@ -19,7 +19,6 @@ import (
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/storage"
 )
@@ -30,30 +29,30 @@ type quotaKVServer struct {
 }
 
 type quotaAlarmer struct {
-	q  storage.Quota
-	a  Alarmer
-	id types.ID
+	s    *etcdserver.EtcdServer
+	name string
 }
 
 // check whether request satisfies the quota. If there is not enough space,
 // ignore request and raise the free space alarm.
 func (qa *quotaAlarmer) check(ctx context.Context, r any) error {
-	if qa.q.Available(r) {
+	// The server's backend is replaced when it applies a snapshot.
+	if newBackendQuota(qa.s, qa.name).Available(r) {
 		return nil
 	}
 	req := &pb.AlarmRequest{
-		MemberID: uint64(qa.id),
+		MemberID: uint64(qa.s.MemberID()),
 		Action:   pb.AlarmRequest_ACTIVATE,
 		Alarm:    pb.AlarmType_NOSPACE,
 	}
-	qa.a.Alarm(ctx, req)
+	qa.s.Alarm(ctx, req)
 	return rpctypes.ErrGRPCNoSpace
 }
 
 func NewQuotaKVServer(s *etcdserver.EtcdServer) pb.KVServer {
 	return &quotaKVServer{
 		NewKVServer(s),
-		quotaAlarmer{newBackendQuota(s, "kv"), s, s.MemberID()},
+		quotaAlarmer{s, "kv"},
 	}
 }
 
@@ -86,7 +85,7 @@ func (s *quotaLeaseServer) LeaseGrant(ctx context.Context, cr *pb.LeaseGrantRequ
 func NewQuotaLeaseServer(s *etcdserver.EtcdServer) pb.LeaseServer {
 	return &quotaLeaseServer{
 		NewLeaseServer(s),
-		quotaAlarmer{newBackendQuota(s, "lease"), s, s.MemberID()},
+		quotaAlarmer{s, "lease"},
 	}
 }
 
