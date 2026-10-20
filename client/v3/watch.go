@@ -485,10 +485,15 @@ func (w *watchGRPCStream) sendCloseSubstream(ws *watcherStream, resp *WatchRespo
 }
 
 func (w *watchGRPCStream) closeSubstream(ws *watcherStream) {
-	// send channel response in case stream was never established
-	select {
-	case ws.initReq.retc <- ws.outc:
-	default:
+	// send channel response in case stream was never established; a nil
+	// outc was closed by waitCancelSubstreams (the watch's context is done,
+	// which Watch reports with a closed channel of its own): never hand
+	// Watch a nil channel
+	if ws.outc != nil {
+		select {
+		case ws.initReq.retc <- ws.outc:
+		default:
+		}
 	}
 	// close subscriber's channel
 	if closeErr := w.closeErr; closeErr != nil && ws.initReq.ctx.Err() == nil {
