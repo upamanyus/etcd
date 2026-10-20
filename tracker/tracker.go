@@ -278,6 +278,16 @@ func (p *ProgressTracker) OneLessThanQuorumInReplicationSet() map[uint64]quorum.
 	}
 
 	epoch := p.Epoch
+	// The witness of both halves of a joint configuration is sent an entry only if both
+	// halves have it in their replication sets. Its acknowledgement counts in both halves'
+	// commit, and a vote it grants is checked against the incoming half's replication set
+	// only: an entry acknowledged by quorum-1 of one half's replication set alone, with the
+	// witness excluded from the other's, would let a candidate lacking the committed entry win
+	// with the witness's vote.
+	if epoch.ReplicationSet[0].Witness != 0 &&
+		epoch.ReplicationSet[0].Witness == epoch.ReplicationSet[1].Witness && w1 != w2 {
+		return nil
+	}
 	indexer := scopedAckIndexer{indexer: matchAckIndexer(p.Progress), scope: epoch.ReplicationSet[0].NonWitnessVoters}
 	result := map[uint64]quorum.Index{}
 
