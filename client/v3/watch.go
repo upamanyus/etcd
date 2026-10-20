@@ -626,6 +626,9 @@ func (w *watchGRPCStream) run() {
 					// nothing may be sent on the closed recvc: drop the
 					// substream so that broadcastResponse skips it
 					delete(w.substreams, pbresp.WatchId)
+					// the server has forgotten the id: after a reconnect it may
+					// name another watch, which closeSubstream must not delete
+					ws.id = InvalidWatchID
 				}
 
 				// reset for next iteration
