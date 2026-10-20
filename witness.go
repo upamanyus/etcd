@@ -72,7 +72,7 @@ func (w *witness) Process(m WitnessMessage) (*raftpb.Message, error) {
 		}
 		w.state = state.GetState()
 		if m.Type == raftpb.MsgHeartbeat && m.Term == w.state.GetState().GetTerm() {
-			return w.handleHeartbeat(m), nil
+			return w.handleHeartbeat(m, w.state.GetState().GetTerm()), nil
 		}
 
 		resp, handled = w.processNoUpdate(m)
@@ -86,7 +86,8 @@ func (w *witness) Process(m WitnessMessage) (*raftpb.Message, error) {
 		}
 		switch m.Type {
 		case raftpb.MsgHeartbeat:
-			resp = w.handleHeartbeat(m)
+			// st's term: m.Term, which processMessageWithNewerTerm raised it to
+			resp = w.handleHeartbeat(m, st.GetState().GetTerm())
 		case raftpb.MsgApp:
 			resp = w.handleAppend(m, st)
 		case raftpb.MsgPreVote, raftpb.MsgVote:
@@ -171,23 +172,26 @@ func (w *witness) cloneState() *raftpb.WitnessHardState {
 			Vote:   new(w.state.GetState().GetVote()),
 			Commit: new(w.state.GetState().GetCommit()),
 		},
-		LastLogIndex:           new(w.state.GetLastLogIndex()),
-		LastLogTerm:            new(w.state.GetLastLogTerm()),
-		LastLogSubterm:         new(w.state.GetLastLogSubterm()),
-		Lead:                   new(w.state.GetLead()),
-		ReplicationSet:         make([]uint64, len(w.state.ReplicationSet)),
-		ReplicationSetOutgoing: make([]uint64, len(w.state.ReplicationSetOutgoing)),
+		LastLogIndex:   new(w.state.GetLastLogIndex()),
+		LastLogTerm:    new(w.state.GetLastLogTerm()),
+		LastLogSubterm: new(w.state.GetLastLogSubterm()),
+		Lead:           new(w.state.GetLead()),
+		// through the nil-safe getters: a storage may hand out a nil state for
+		// "nothing stored yet", which every other read takes as the zero state
+		ReplicationSet:         make([]uint64, len(w.state.GetReplicationSet())),
+		ReplicationSetOutgoing: make([]uint64, len(w.state.GetReplicationSetOutgoing())),
 	}
-	copy(st.ReplicationSet, w.state.ReplicationSet)
-	copy(st.ReplicationSetOutgoing, w.state.ReplicationSetOutgoing)
+	copy(st.ReplicationSet, w.state.GetReplicationSet())
+	copy(st.ReplicationSetOutgoing, w.state.GetReplicationSetOutgoing())
 
 	return st
 }
 
-func (w *witness) handleHeartbeat(m WitnessMessage) *raftpb.Message {
+// handleHeartbeat answers a heartbeat at the witness's term, term.
+func (w *witness) handleHeartbeat(m WitnessMessage, term uint64) *raftpb.Message {
 	return &raftpb.Message{
 		Type:    raftpb.MsgHeartbeatResp.Enum(),
-		Term:    new(w.state.GetState().GetTerm()),
+		Term:    new(term),
 		From:    new(w.id),
 		To:      new(m.From),
 		Context: m.Context,

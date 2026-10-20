@@ -129,6 +129,38 @@ func TestWitnessOlderTermResponse(t *testing.T) {
 
 // The witness's acknowledgement of a request that raised its term carries the
 // new term, so that the leader does not drop it as stale.
+func TestWitnessHeartbeatNewerTermResponse(t *testing.T) {
+	st := &memWitnessStorage{state: &pb.WitnessHardState{State: &pb.HardState{Term: new(uint64(1))}}}
+	w := NewWitness(WitnessConfig{ID: 3, Storage: st})
+	resp, err := w.Process(WitnessMessage{Type: pb.MsgHeartbeat, From: 1, To: 3, Term: 2})
+	require.NoError(t, err)
+	require.Equal(t, pb.MsgHeartbeatResp, resp.GetType())
+	require.Equal(t, uint64(2), resp.GetTerm())
+	require.Equal(t, uint64(2), st.state.GetState().GetTerm())
+}
+
+// nilStateStorage hands out a nil state for "nothing stored yet".
+type nilStateStorage struct{ memWitnessStorage }
+
+func (s *nilStateStorage) GetWitnessState() (WitnessState, error) {
+	if s.state == nil {
+		return &memWitnessState{s: &s.memWitnessStorage, version: s.version, state: nil}, nil
+	}
+	return s.memWitnessStorage.GetWitnessState()
+}
+
+// A storage whose fresh state is nil: the witness reads it as the zero state (it panicked in
+// cloneState, issues/raft-witness-getstate-nil.md).
+func TestWitnessNilStoredState(t *testing.T) {
+	st := &nilStateStorage{}
+	w := NewWitness(WitnessConfig{ID: 3, Storage: st})
+	resp, err := w.Process(WitnessMessage{Type: pb.MsgVote, From: 1, To: 3, Term: 1,
+		LastLogTerm: 1, Votes: map[uint64]bool{1: true}})
+	require.NoError(t, err)
+	require.Equal(t, pb.MsgVoteResp, resp.GetType())
+	require.False(t, resp.GetReject())
+}
+
 func TestWitnessAppendNewerTermResponse(t *testing.T) {
 	st := &memWitnessStorage{state: &pb.WitnessHardState{State: &pb.HardState{Term: new(uint64(1))}}}
 	w := NewWitness(WitnessConfig{ID: 3, Storage: st})
