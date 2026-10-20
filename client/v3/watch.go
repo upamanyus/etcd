@@ -870,8 +870,10 @@ func (w *watchGRPCStream) serveSubstream(ws *watcherStream, resumec chan struct{
 						nextRev = wr.Header.Revision
 					}
 				}
-			} else {
-				// current progress of watch; <= store revision
+			} else if wr.Header.Revision+1 > nextRev {
+				// current progress of watch; <= store revision. A watch from
+				// a revision the store has not reached gets progress below its
+				// start: never resume below it
 				nextRev = wr.Header.Revision + 1
 			}
 
