@@ -987,9 +987,11 @@ func (w *watchGRPCStream) newWatchClient() (pb.Watch_WatchClient, error) {
 
 func (w *watchGRPCStream) waitCancelSubstreams(stopc <-chan struct{}) <-chan struct{} {
 	var wg sync.WaitGroup
-	wg.Add(len(w.resuming))
 	donec := make(chan struct{})
 	for i := range w.resuming {
+		// one at a time: the counter is an int32, below the goroutines
+		// running, where len(w.resuming) need not be
+		wg.Add(1)
 		go func(ws *watcherStream) {
 			defer wg.Done()
 			if ws.closing {
