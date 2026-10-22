@@ -1097,6 +1097,15 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	s.bemu.Unlock()
 	bemuUnlocked = true
 
+	// Release the WAL and the .snap.db files older than this snapshot only
+	// now that its own .snap.db has been opened: raftNode may already have
+	// handed out a newer snapshot, and releasing at that one would delete
+	// this snapshot's file before OpenSnapshotBackend reached it.
+	if err := s.r.storage.Release(toApply.snapshot); err != nil {
+		lg.Panic("failed to release Raft wal", zap.Error(err))
+	}
+	// gofail: var raftAfterWALRelease struct{}
+
 	lg.Info("restoring alarm store")
 
 	if err := s.alarmStore.Recover(schema.NewAlarmBackend(lg, newbe)); err != nil {
