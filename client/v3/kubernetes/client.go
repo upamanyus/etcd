@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/goose-lang/primitive"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -45,6 +46,10 @@ type Client struct {
 var _ Interface = (*Client)(nil)
 
 func (k Client) Get(ctx context.Context, key string, opts GetOptions) (resp GetResponse, err error) {
+	// Verification only (a no-op in Go): a prophecy of the response's revision and the key's mod
+	// revision (0 if absent), which identify the state the response reflects, so that the proof
+	// knows, at each state the read may be served at, whether it is the response's.
+	p := primitive.NewProph()
 	rangeResp, err := k.KV.Get(ctx, key, clientv3.WithRev(opts.Revision), clientv3.WithLimit(1))
 	if err != nil {
 		return resp, err
@@ -52,6 +57,12 @@ func (k Client) Get(ctx context.Context, key string, opts GetOptions) (resp GetR
 	resp.Revision = rangeResp.Header.Revision
 	if len(rangeResp.Kvs) == 1 {
 		resp.KV = rangeResp.Kvs[0]
+	}
+	p.ResolveU64(uint64(resp.Revision))
+	if resp.KV != nil {
+		p.ResolveU64(uint64(resp.KV.ModRevision))
+	} else {
+		p.ResolveU64(0)
 	}
 	return resp, nil
 }
