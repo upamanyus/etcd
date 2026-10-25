@@ -330,6 +330,17 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 				} else {
 					// leader already processed 'MsgSnap' and signaled
 					notifyc <- struct{}{}
+
+					// The leader waits too: raft accepts a conf change proposal once
+					// the pending one is at or below the applied index, which Advance
+					// moves, so a conf change must be applied before Advance.
+					if confChanged {
+						select {
+						case notifyc <- struct{}{}:
+						case <-r.stopped:
+							return
+						}
+					}
 				}
 
 				// gofail: var raftBeforeAdvance struct{}

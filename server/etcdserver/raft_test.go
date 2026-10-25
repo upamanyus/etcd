@@ -212,53 +212,57 @@ func TestStopRaftWhenWaitingForApplyDone(t *testing.T) {
 
 // TestConfigChangeBlocksApply ensures toApply blocks if committed entries contain config-change.
 func TestConfigChangeBlocksApply(t *testing.T) {
-	n := newNopReadyNode()
+	for _, state := range []raft.StateType{raft.StateFollower, raft.StateLeader} {
+		t.Run(state.String(), func(t *testing.T) {
+			n := newNopReadyNode()
 
-	r := newRaftNode(raftNodeConfig{
-		lg:          zaptest.NewLogger(t),
-		Node:        n,
-		storage:     mockstorage.NewStorageRecorder(""),
-		raftStorage: raft.NewMemoryStorage(),
-		transport:   newNopTransporter(),
-	})
-	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
+			r := newRaftNode(raftNodeConfig{
+				lg:          zaptest.NewLogger(t),
+				Node:        n,
+				storage:     mockstorage.NewStorageRecorder(""),
+				raftStorage: raft.NewMemoryStorage(),
+				transport:   newNopTransporter(),
+			})
+			srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
 
-	srv.r.start(&raftReadyHandler{
-		getLead:          func() uint64 { return 0 },
-		updateLead:       func(uint64) {},
-		updateLeadership: func(bool) {},
-	})
-	defer srv.r.stop()
+			srv.r.start(&raftReadyHandler{
+				getLead:          func() uint64 { return 0 },
+				updateLead:       func(uint64) {},
+				updateLeadership: func(bool) {},
+			})
+			defer srv.r.stop()
 
-	n.readyc <- raft.Ready{
-		SoftState:        &raft.SoftState{RaftState: raft.StateFollower},
-		CommittedEntries: []*raftpb.Entry{{Type: raftpb.EntryConfChange.Enum()}},
-	}
-	ap := <-srv.r.applyc
+			n.readyc <- raft.Ready{
+				SoftState:        &raft.SoftState{RaftState: state},
+				CommittedEntries: []*raftpb.Entry{{Type: raftpb.EntryConfChange.Enum()}},
+			}
+			ap := <-srv.r.applyc
 
-	continueC := make(chan struct{})
-	go func() {
-		n.readyc <- raft.Ready{}
-		<-srv.r.applyc
-		close(continueC)
-	}()
+			continueC := make(chan struct{})
+			go func() {
+				n.readyc <- raft.Ready{}
+				<-srv.r.applyc
+				close(continueC)
+			}()
 
-	select {
-	case <-continueC:
-		t.Fatalf("unexpected execution: raft routine should block waiting for toApply")
-	case <-time.After(time.Second):
-	}
+			select {
+			case <-continueC:
+				t.Fatalf("unexpected execution: raft routine should block waiting for toApply")
+			case <-time.After(time.Second):
+			}
 
-	// finish toApply, unblock raft routine
-	<-ap.notifyc
+			// finish toApply, unblock raft routine
+			<-ap.notifyc
 
-	<-ap.raftAdvancedC
-	t.Log("received raft advance notification")
+			<-ap.raftAdvancedC
+			t.Log("received raft advance notification")
 
-	select {
-	case <-continueC:
-	case <-time.After(time.Second):
-		t.Fatalf("unexpected blocking on execution")
+			select {
+			case <-continueC:
+			case <-time.After(time.Second):
+				t.Fatalf("unexpected blocking on execution")
+			}
+		})
 	}
 }
 
