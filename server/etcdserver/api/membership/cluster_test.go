@@ -1178,3 +1178,15 @@ func TestClusterStore(t *testing.T) {
 		})
 	}
 }
+
+// TestIsLocalMemberLearnerRemoved checks that a member whose own removal was
+// applied is no learner, rather than panicking (a request's learner check may
+// run after the removal and before the server stops).
+func TestIsLocalMemberLearnerRemoved(t *testing.T) {
+	c := newTestCluster(t, []*Member{newTestMember(1, nil, "node1", nil), newTestMember(2, nil, "node2", nil)})
+	c.SetID(types.ID(1), types.ID(100))
+	c.RemoveMember(types.ID(1), true)
+	if c.IsLocalMemberLearner() {
+		t.Fatal("a removed local member should not be a learner")
+	}
+}

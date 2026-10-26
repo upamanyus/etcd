@@ -788,11 +788,9 @@ func (c *RaftCluster) IsLocalMemberLearner() bool {
 	defer c.Unlock()
 	localMember, ok := c.members[c.localID]
 	if !ok {
-		c.lg.Panic(
-			"failed to find local ID in cluster members",
-			zap.String("cluster-id", c.cid.String()),
-			zap.String("local-member-id", c.localID.String()),
-		)
+		// The local member was removed (its removal applied, the server not yet
+		// stopped): it is no learner.
+		return false
 	}
 	return localMember.IsLearner
 }
