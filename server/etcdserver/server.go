@@ -385,7 +385,8 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		if err != nil {
 			return nil, err
 		}
-		srv.compactor.Run()
+		// The compactor is run by start(): its goroutine calls srv.Compact, which needs
+		// the wait registry and the other fields start() sets.
 	}
 
 	if err = srv.restoreAlarms(); err != nil {
@@ -591,6 +592,11 @@ func (s *EtcdServer) start() {
 			zap.String("local-server-version", version.Version),
 			zap.String("cluster-version", "to_be_decided"),
 		)
+	}
+
+	// The auto-compactor proposes through s.w and the fields above: run it only now.
+	if s.compactor != nil {
+		s.compactor.Run()
 	}
 
 	// TODO: if this is an empty log, writes all peer infos
