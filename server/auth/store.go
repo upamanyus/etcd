@@ -827,24 +827,22 @@ func (as *authStore) RoleGrantPermission(r *pb.AuthRoleGrantPermissionRequest) (
 		return nil, ErrRoleNotFound
 	}
 
-	idx := sort.Search(len(role.KeyPermission), func(i int) bool {
-		return bytes.Compare(role.KeyPermission[i].Key, r.Perm.Key) >= 0
-	})
-
-	if idx < len(role.KeyPermission) && bytes.Equal(role.KeyPermission[idx].Key, r.Perm.Key) && bytes.Equal(role.KeyPermission[idx].RangeEnd, r.Perm.RangeEnd) {
-		// update existing permission
-		role.KeyPermission[idx].PermType = r.Perm.PermType
-	} else {
-		// append new permission to the role
-		newPerm := &authpb.Permission{
-			Key:      r.Perm.Key,
-			RangeEnd: r.Perm.RangeEnd,
-			PermType: r.Perm.PermType,
+	// Replace every permission on the range [Key, RangeEnd) by the new one. Looking up the
+	// existing permission by key alone (sort.Search) found it only when it was the first with
+	// its key; otherwise the new one was appended beside it and the old type stayed in effect.
+	var kept []*authpb.Permission
+	for _, perm := range role.KeyPermission {
+		if !bytes.Equal(perm.Key, r.Perm.Key) || !bytes.Equal(perm.RangeEnd, r.Perm.RangeEnd) {
+			kept = append(kept, perm)
 		}
-
-		role.KeyPermission = append(role.KeyPermission, newPerm)
-		sort.Sort(permSlice(role.KeyPermission))
 	}
+	newPerm := &authpb.Permission{
+		Key:      r.Perm.Key,
+		RangeEnd: r.Perm.RangeEnd,
+		PermType: r.Perm.PermType,
+	}
+	role.KeyPermission = append(kept, newPerm)
+	sort.Sort(permSlice(role.KeyPermission))
 
 	tx.UnsafePutRole(role)
 
