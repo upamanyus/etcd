@@ -767,6 +767,24 @@ func (r *raft) appliedSnap(snap *pb.Snapshot) {
 	index := snap.GetMetadata().GetIndex()
 	r.raftLog.stableSnapTo(index)
 	r.appliedTo(index, 0 /* size */)
+
+	// Switch to the snapshot's configuration only now that it is applied: until
+	// then, ApplyConfChange calls are for entries before it, which change the
+	// configuration in use, as they would without the snapshot.
+	cs := pb.EnsureConfState(snap.GetMetadata().GetConfState())
+	r.trk = tracker.MakeProgressTracker(r.trk.MaxInflight, r.trk.MaxInflightBytes)
+	cfg, trk, err := confchange.Restore(confchange.Changer{
+		Tracker:   r.trk,
+		LastIndex: r.raftLog.lastIndex(),
+	}, cs)
+
+	if err != nil {
+		// This should never happen. Either there's a bug in our config change
+		// handling or the client corrupted the conf change.
+		panic(fmt.Sprintf("unable to restore config %+v: %s", cs, err))
+	}
+
+	assertConfStatesEquivalent(r.logger, cs, r.switchToConfig(cfg, trk))
 }
 
 // maybeCommit attempts to advance the commit index. Returns true if the commit
@@ -1851,9 +1869,10 @@ func (r *raft) handleSnapshot(m *pb.Message) {
 	}
 }
 
-// restore recovers the state machine from a snapshot. It restores the log and the
-// configuration of state machine. If this method returns false, the snapshot was
-// ignored, either because it was obsolete or because of an error.
+// restore recovers the state machine from a snapshot. It restores the log; the
+// configuration is restored when the snapshot is applied (appliedSnap). If this
+// method returns false, the snapshot was ignored, either because it was obsolete
+// or because of an error.
 func (r *raft) restore(s *pb.Snapshot) bool {
 	if s.GetMetadata().GetIndex() <= r.raftLog.committed {
 		return false
@@ -1916,21 +1935,6 @@ func (r *raft) restore(s *pb.Snapshot) bool {
 	}
 
 	r.raftLog.restore(s)
-
-	// Reset the configuration and add the (potentially updated) peers in anew.
-	r.trk = tracker.MakeProgressTracker(r.trk.MaxInflight, r.trk.MaxInflightBytes)
-	cfg, trk, err := confchange.Restore(confchange.Changer{
-		Tracker:   r.trk,
-		LastIndex: r.raftLog.lastIndex(),
-	}, cs)
-
-	if err != nil {
-		// This should never happen. Either there's a bug in our config change
-		// handling or the client corrupted the conf change.
-		panic(fmt.Sprintf("unable to restore config %+v: %s", cs, err))
-	}
-
-	assertConfStatesEquivalent(r.logger, cs, r.switchToConfig(cfg, trk))
 
 	last := r.raftLog.lastEntryID()
 	r.logger.Infof("%x [commit: %d, lastindex: %d, lastterm: %d] restored snapshot [index: %d, term: %d]",

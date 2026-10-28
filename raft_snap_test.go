@@ -37,6 +37,7 @@ func TestSendingSnapshotSetPendingSnapshot(t *testing.T) {
 	storage := newTestMemoryStorage(withPeers(1))
 	sm := newTestRaft(1, 10, 1, storage)
 	sm.restore(testingSnap)
+	applyRestoredSnapshot(t, sm, storage)
 
 	sm.becomeCandidate()
 	sm.becomeLeader()

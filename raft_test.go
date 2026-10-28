@@ -2561,13 +2561,25 @@ func TestRestore(t *testing.T) {
 
 	assert.Equal(t, s.GetMetadata().GetIndex(), sm.raftLog.lastIndex())
 	assert.Equal(t, s.GetMetadata().GetTerm(), mustTerm(sm.raftLog.term(s.GetMetadata().GetIndex())))
-	assert.Equal(t, s.GetMetadata().GetConfState().Voters, sm.trk.VoterNodes())
+	// The configuration changes when the snapshot is applied.
+	assert.Equal(t, []uint64{1, 2}, sm.trk.VoterNodes())
 
 	require.False(t, sm.restore(s))
 	for i := 0; i < sm.randomizedElectionTimeout; i++ {
 		sm.tick()
 	}
 	assert.Equal(t, StateFollower, sm.state)
+
+	applyRestoredSnapshot(t, sm, storage)
+	assert.Equal(t, s.GetMetadata().GetConfState().Voters, sm.trk.VoterNodes())
+}
+
+// applyRestoredSnapshot applies the snapshot r restored, as the application
+// does with the one in a Ready.
+func applyRestoredSnapshot(t testing.TB, r *raft, s *MemoryStorage) {
+	snap := r.raftLog.nextUnstableSnapshot()
+	require.NoError(t, s.ApplySnapshot(snap))
+	r.appliedSnap(snap)
 }
 
 // TestRestoreWithLearner restores a snapshot which contains learners.
@@ -2583,6 +2595,7 @@ func TestRestoreWithLearner(t *testing.T) {
 	storage := newTestMemoryStorage(withPeers(1, 2), withLearners(3))
 	sm := newTestLearnerRaft(3, 8, 2, storage)
 	assert.True(t, sm.restore(s))
+	applyRestoredSnapshot(t, sm, storage)
 
 	assert.Equal(t, s.GetMetadata().GetIndex(), sm.raftLog.lastIndex())
 	assert.Equal(t, s.GetMetadata().GetTerm(), mustTerm(sm.raftLog.term(s.GetMetadata().GetIndex())))
@@ -2620,9 +2633,6 @@ func TestRestoreWithVotersOutgoing(t *testing.T) {
 	assert.Equal(t, s.GetMetadata().GetIndex(), sm.raftLog.lastIndex())
 	assert.Equal(t, mustTerm(sm.raftLog.term(s.GetMetadata().GetIndex())), s.GetMetadata().GetTerm())
 
-	sg := sm.trk.VoterNodes()
-	assert.Equal(t, []uint64{1, 2, 3, 4}, sg)
-
 	require.False(t, sm.restore(s))
 
 	// It should not campaign before actually applying data.
@@ -2630,6 +2640,10 @@ func TestRestoreWithVotersOutgoing(t *testing.T) {
 		sm.tick()
 	}
 	assert.Equal(t, StateFollower, sm.state)
+
+	applyRestoredSnapshot(t, sm, storage)
+	sg := sm.trk.VoterNodes()
+	assert.Equal(t, []uint64{1, 2, 3, 4}, sg)
 }
 
 // TestRestoreVoterToLearner verifies that a normal peer can be downgraded to a
@@ -2672,6 +2686,8 @@ func TestRestoreLearnerPromotion(t *testing.T) {
 
 	assert.True(t, sm.isLearner)
 	assert.True(t, sm.restore(s))
+	assert.True(t, sm.isLearner)
+	applyRestoredSnapshot(t, sm, storage)
 	assert.False(t, sm.isLearner)
 }
 
@@ -2745,6 +2761,7 @@ func TestProvideSnap(t *testing.T) {
 	storage := newTestMemoryStorage(withPeers(1))
 	sm := newTestRaft(1, 10, 1, storage)
 	sm.restore(s)
+	applyRestoredSnapshot(t, sm, storage)
 
 	sm.becomeCandidate()
 	sm.becomeLeader()
@@ -2771,6 +2788,7 @@ func TestIgnoreProvidingSnap(t *testing.T) {
 	storage := newTestMemoryStorage(withPeers(1))
 	sm := newTestRaft(1, 10, 1, storage)
 	sm.restore(s)
+	applyRestoredSnapshot(t, sm, storage)
 
 	sm.becomeCandidate()
 	sm.becomeLeader()
