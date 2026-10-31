@@ -66,3 +66,23 @@ func getError(err error) string {
 
 	return err.Error()
 }
+
+func TestCheckTxnRequestNestedOps(t *testing.T) {
+	rangeOp := &pb.RequestOp{Request: &pb.RequestOp_RequestRange{RequestRange: &pb.RangeRequest{
+		Key: []byte{0}, RangeEnd: []byte{0}, KeysOnly: true,
+	}}}
+	nested := &pb.TxnRequest{}
+	for range 64 {
+		nested.Success = append(nested.Success, rangeOp)
+	}
+	txn := &pb.TxnRequest{}
+	for range 64 {
+		txn.Success = append(txn.Success, &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{RequestTxn: nested}})
+	}
+
+	// 64 nested txns of 64 ranges each: 4096 ranges, more than 128 operations.
+	err := checkTxnRequest(txn, 128)
+	if getError(err) != getError(rpctypes.ErrGRPCTooManyOps) {
+		t.Errorf("expected %q, but got %q", getError(rpctypes.ErrGRPCTooManyOps), getError(err))
+	}
+}

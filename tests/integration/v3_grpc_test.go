@@ -262,6 +262,34 @@ func TestV3TxnTooManyOps(t *testing.T) {
 	}
 }
 
+// TestV3TxnNestedTooManyOps ensures that the operations of nested txns count
+// toward the limit on a txn's operations.
+func TestV3TxnNestedTooManyOps(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1, MaxTxnOps: 128})
+	defer clus.Terminate(t)
+
+	kvc := integration.ToGRPC(clus.RandClient()).KV
+
+	rangeOp := &pb.RequestOp{Request: &pb.RequestOp_RequestRange{RequestRange: &pb.RangeRequest{
+		Key: []byte{0}, RangeEnd: []byte{0}, KeysOnly: true,
+	}}}
+	nested := &pb.TxnRequest{}
+	for range 64 {
+		nested.Success = append(nested.Success, rangeOp)
+	}
+	txn := &pb.TxnRequest{}
+	for range 64 {
+		txn.Success = append(txn.Success, &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{RequestTxn: nested}})
+	}
+
+	// 64 nested txns of 64 ranges each: 4096 ranges, more than 128 operations.
+	_, err := kvc.Txn(t.Context(), txn)
+	if !eqErrGRPC(err, rpctypes.ErrGRPCTooManyOps) {
+		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCTooManyOps)
+	}
+}
+
 func TestV3TxnDuplicateKeys(t *testing.T) {
 	integration.BeforeTest(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
