@@ -200,14 +200,7 @@ func checkDeleteRequest(r *pb.DeleteRangeRequest) error {
 }
 
 func checkTxnRequest(r *pb.TxnRequest, maxTxnOps int) error {
-	opc := len(r.Compare)
-	if opc < len(r.Success) {
-		opc = len(r.Success)
-	}
-	if opc < len(r.Failure) {
-		opc = len(r.Failure)
-	}
-	if opc > maxTxnOps {
+	if txnOps(r) > maxTxnOps {
 		return rpctypes.ErrGRPCTooManyOps
 	}
 
@@ -217,17 +210,31 @@ func checkTxnRequest(r *pb.TxnRequest, maxTxnOps int) error {
 		}
 	}
 	for _, u := range r.Success {
-		if err := checkRequestOp(u, maxTxnOps-opc); err != nil {
+		if err := checkRequestOp(u, maxTxnOps); err != nil {
 			return err
 		}
 	}
 	for _, u := range r.Failure {
-		if err := checkRequestOp(u, maxTxnOps-opc); err != nil {
+		if err := checkRequestOp(u, maxTxnOps); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// txnOps returns the number of operations of r, counting those of its nested
+// txns, which run in addition to r's own.
+func txnOps(r *pb.TxnRequest) int {
+	opc := max(len(r.Compare), len(r.Success), len(r.Failure))
+	for _, reqs := range [][]*pb.RequestOp{r.Success, r.Failure} {
+		for _, u := range reqs {
+			if t := u.GetRequestTxn(); t != nil {
+				opc += txnOps(t)
+			}
+		}
+	}
+	return opc
 }
 
 // checkIntervals tests whether puts and deletes overlap for a list of ops. If
