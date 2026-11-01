@@ -74,15 +74,17 @@ func NewWatchServer(s *etcdserver.EtcdServer) pb.WatchServer {
 	if srv.lg == nil {
 		srv.lg = zap.NewNop()
 	}
-	if s.Cfg.WatchProgressNotifyInterval > 0 {
-		if s.Cfg.WatchProgressNotifyInterval < minWatchProgressInterval {
+	// The adjusted interval is kept local: s.Cfg is read concurrently once the server has
+	// started (applySnapshot copies it; another listener's NewWatchServer reads this field).
+	if interval := s.Cfg.WatchProgressNotifyInterval; interval > 0 {
+		if interval < minWatchProgressInterval {
 			srv.lg.Warn(
 				"adjusting watch progress notify interval to minimum period",
 				zap.Duration("min-watch-progress-notify-interval", minWatchProgressInterval),
 			)
-			s.Cfg.WatchProgressNotifyInterval = minWatchProgressInterval
+			interval = minWatchProgressInterval
 		}
-		SetProgressReportInterval(s.Cfg.WatchProgressNotifyInterval)
+		SetProgressReportInterval(interval)
 	}
 	return srv
 }
