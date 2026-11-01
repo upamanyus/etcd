@@ -15,6 +15,8 @@
 package rafthttp
 
 import (
+	"sync"
+
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/client/pkg/v3/types"
@@ -27,6 +29,12 @@ type remote struct {
 	id       types.ID
 	status   *peerStatus
 	pipeline *pipeline
+
+	// mu guards stopped: Pause, Resume and stop may be called more than once and concurrently
+	// (CutPeer, MendPeer, Transport.Stop); the pipeline is stopped once and restarted only when
+	// stopped.
+	mu      sync.Mutex
+	stopped bool
 }
 
 func startRemote(tr *Transport, urls types.URLs, id types.ID) *remote {
@@ -83,7 +91,13 @@ func (g *remote) send(m *raftpb.Message) {
 }
 
 func (g *remote) stop() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped {
+		return
+	}
 	g.pipeline.stop()
+	g.stopped = true
 }
 
 func (g *remote) Pause() {
@@ -91,5 +105,11 @@ func (g *remote) Pause() {
 }
 
 func (g *remote) Resume() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.stopped {
+		return
+	}
 	g.pipeline.start()
+	g.stopped = false
 }
