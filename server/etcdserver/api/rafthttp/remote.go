@@ -30,11 +30,11 @@ type remote struct {
 	status   *peerStatus
 	pipeline *pipeline
 
-	// mu guards stopped: Pause, Resume and stop may be called more than once and concurrently
-	// (CutPeer, MendPeer, Transport.Stop); the pipeline is stopped once and restarted only when
-	// stopped.
-	mu      sync.Mutex
-	stopped bool
+	// mu guards paused. Pause and Resume only set it (as peer's): the pipeline is started once,
+	// by startRemote, and stopped once, by Transport.Stop, so they may be called any number of
+	// times, concurrently with send.
+	mu     sync.Mutex
+	paused bool
 }
 
 func startRemote(tr *Transport, urls types.URLs, id types.ID) *remote {
@@ -60,6 +60,14 @@ func startRemote(tr *Transport, urls types.URLs, id types.ID) *remote {
 }
 
 func (g *remote) send(m *raftpb.Message) {
+	g.mu.Lock()
+	paused := g.paused
+	g.mu.Unlock()
+
+	if paused {
+		return
+	}
+
 	select {
 	case g.pipeline.msgc <- m:
 	default:
@@ -91,25 +99,17 @@ func (g *remote) send(m *raftpb.Message) {
 }
 
 func (g *remote) stop() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.stopped {
-		return
-	}
 	g.pipeline.stop()
-	g.stopped = true
 }
 
 func (g *remote) Pause() {
-	g.stop()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.paused = true
 }
 
 func (g *remote) Resume() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.stopped {
-		return
-	}
-	g.pipeline.start()
-	g.stopped = false
+	g.paused = false
 }
