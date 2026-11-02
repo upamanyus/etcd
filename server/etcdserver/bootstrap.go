@@ -434,6 +434,18 @@ func bootstrapClusterWithWAL(cfg config.ServerConfig, meta *snapshotMetadata) (*
 	}, nil
 }
 
+// newestSnapshotEntry is the position in walSnaps (not empty) of the snapshot record of the highest
+// index, the last one among equals.
+func newestSnapshotEntry(walSnaps []*walpb.Snapshot) int {
+	idx := 0
+	for i, s := range walSnaps {
+		if s.GetIndex() >= walSnaps[idx].GetIndex() {
+			idx = i
+		}
+	}
+	return idx
+}
+
 func recoverSnapshot(cfg config.ServerConfig, be backend.Backend, beExist bool, beHooks *serverstorage.BackendHooks, ci cindex.ConsistentIndexer) (*raftpb.Snapshot, backend.Backend, error) {
 	// Find a snapshot to start/restart a raft node
 	walSnaps, err := wal.ValidSnapshotEntries(cfg.Logger, cfg.WALDir())
@@ -443,7 +455,11 @@ func recoverSnapshot(cfg config.ServerConfig, be backend.Backend, beExist bool, 
 
 	var snapshot *raftpb.Snapshot
 	if len(walSnaps) > 0 {
-		idx := len(walSnaps) - 1
+		// The valid record of the highest index, not the last: the apply loop's own snapshot can
+		// be saved after a newer snapshot the raft loop received (the two goroutines write the WAL
+		// unordered), and the WAL opened at the older one would read back the log the received
+		// snapshot replaced.
+		idx := newestSnapshotEntry(walSnaps)
 		snapshot = &raftpb.Snapshot{
 			Metadata: &raftpb.SnapshotMetadata{
 				Term:  new(walSnaps[idx].GetTerm()),

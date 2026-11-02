@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
@@ -489,20 +490,15 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	var match bool
 	// The log the records write is the log at the start snapshot's index followed by ents. An
 	// entry written at or below the start index truncates the log there, so the entries above it
-	// go; startTerm is the term of the entry the log holds at the start index, if it holds one.
-	// At the start snapshot's own record, a log whose entry at the start index has another term
-	// (or none) conflicts with the snapshot: raft discarded that log when it installed the
-	// snapshot, so its entries above the start index go too.
-	var startTerm uint64
-	var startHeld bool
+	// go. At the start snapshot's own record, a snapshot above the commit index saved before it
+	// is one raft received and installed (its own snapshots are of applied, so committed,
+	// entries): raft discarded the log it had, so the entries above the start index go too.
 	for err = decoder.Decode(rec); err == nil; err = decoder.Decode(rec) {
 		switch rec.GetType() {
 		case EntryType:
 			e := MustUnmarshalEntry(rec.Data)
 			if e.GetIndex() <= w.start.GetIndex() {
 				ents = ents[:0]
-				startHeld = e.GetIndex() == w.start.GetIndex()
-				startTerm = e.GetTerm()
 			}
 			// 0 <= e.GetIndex()-w.start.GetIndex() - 1 < len(ents)
 			if e.GetIndex() > w.start.GetIndex() {
@@ -549,10 +545,9 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 					return nil, state, nil, ErrSnapshotMismatch
 				}
 				match = true
-				if !startHeld || startTerm != snap.GetTerm() {
+				if snap.GetIndex() > state.GetCommit() {
 					ents = ents[:0]
 				}
-				startHeld, startTerm = true, snap.GetTerm()
 			}
 
 		default:
@@ -594,6 +589,11 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	if !match {
 		err = ErrSnapshotNotFound
 	}
+
+	// The hard state the records hold: a cut repeats it at the head of the next file (saveState),
+	// so that a later ReadAll starting in that file knows the commit index saved before its records
+	// (until now a reopened WAL's first cut repeated none).
+	w.state = proto.Clone(state).(*raftpb.HardState)
 
 	// close decoder, disable reading
 	if w.readClose != nil {

@@ -293,3 +293,16 @@ func createSnapshotAndBackendDB(cfg config.ServerConfig, snapshotTerm, snapshotI
 	schema.UnsafeUpdateConsistentIndex(be.BatchTx(), 1, 1)
 	return be.Close()
 }
+
+// The restart opens the WAL at its snapshot record of the highest index, not the last one: the apply
+// loop's own snapshot can be saved after a newer one the raft loop received.
+func TestNewestSnapshotEntry(t *testing.T) {
+	snaps := []*walpb.Snapshot{
+		{Index: new(uint64(0)), Term: new(uint64(0))},
+		{Index: new(uint64(5)), Term: new(uint64(2))},
+		{Index: new(uint64(3)), Term: new(uint64(1))},
+	}
+	if got := newestSnapshotEntry(snaps); got != 1 {
+		t.Fatalf("newestSnapshotEntry = %d, want 1", got)
+	}
+}

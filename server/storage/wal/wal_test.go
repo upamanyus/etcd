@@ -1318,3 +1318,31 @@ func TestReadAllTruncatesAtEntryBelowStart(t *testing.T) {
 	}, snap)
 	assert.Empty(t, entryIDs(ents))
 }
+
+// A received snapshot whose entry the WAL happens to hold (raft decided on its in-memory log, which
+// a newer leader's appends had changed): it is above the commit saved before it, so the entries
+// above it go.
+func TestReadAllDropsEntriesAboveReceivedSnapshotTheWALMatches(t *testing.T) {
+	snap := &walpb.Snapshot{Index: new(uint64(3)), Term: new(uint64(1)), ConfState: &raftpb.ConfState{Voters: []uint64{1}}}
+	ents := readAllFrom(t, func(w *WAL) {
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(1))}, entsOf(1, 1, 5)))
+		require.NoError(t, w.SaveSnapshot(snap))
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(3)), Commit: new(uint64(3))}, nil))
+	}, snap)
+	assert.Empty(t, entryIDs(ents))
+}
+
+// ReadAll restores the hard state a cut repeats at the head of the next file.
+func TestReadAllRestoresState(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Create(zaptest.NewLogger(t), dir, nil)
+	require.NoError(t, err)
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(2)), Commit: new(uint64(4))}, entsOf(2, 1, 4)))
+	require.NoError(t, w.Close())
+	w2, err := Open(zaptest.NewLogger(t), dir, &walpb.Snapshot{})
+	require.NoError(t, err)
+	defer w2.Close()
+	_, _, _, err = w2.ReadAll()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4), w2.state.GetCommit())
+}
