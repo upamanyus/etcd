@@ -1249,3 +1249,72 @@ func TestLastRecordLengthExceedFileEnd(t *testing.T) {
 	// environment, but only once.
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
+
+// readAllFrom writes ops to a new WAL, closes it, opens it at snap and reads it back.
+func readAllFrom(t *testing.T, ops func(w *WAL), snap *walpb.Snapshot) []*raftpb.Entry {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := Create(zaptest.NewLogger(t), dir, nil)
+	require.NoError(t, err)
+	ops(w)
+	require.NoError(t, w.Close())
+	w2, err := Open(zaptest.NewLogger(t), dir, snap)
+	require.NoError(t, err)
+	defer w2.Close()
+	_, _, ents, err := w2.ReadAll()
+	require.NoError(t, err)
+	return ents
+}
+
+func entsOf(term uint64, from, to uint64) []*raftpb.Entry {
+	var es []*raftpb.Entry
+	for i := from; i <= to; i++ {
+		es = append(es, &raftpb.Entry{Index: new(i), Term: new(term)})
+	}
+	return es
+}
+
+func entryIDs(es []*raftpb.Entry) [][2]uint64 {
+	var ids [][2]uint64
+	for _, e := range es {
+		ids = append(ids, [2]uint64{e.GetIndex(), e.GetTerm()})
+	}
+	return ids
+}
+
+// A follower that installs a received snapshot over a conflicting log (raft discards the log) and
+// is restarted before any later entry: ReadAll from the snapshot returns none of the old log.
+func TestReadAllDropsEntriesAReceivedSnapshotDiscards(t *testing.T) {
+	snap := &walpb.Snapshot{Index: new(uint64(3)), Term: new(uint64(2)), ConfState: &raftpb.ConfState{Voters: []uint64{1}}}
+	ents := readAllFrom(t, func(w *WAL) {
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(2))}, entsOf(1, 1, 5)))
+		require.NoError(t, w.SaveSnapshot(snap))
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(2)), Commit: new(uint64(3))}, nil))
+	}, snap)
+	assert.Empty(t, entryIDs(ents))
+}
+
+// A snapshot of the member's own applied log (its entry at the snapshot's index has the snapshot's
+// term) keeps the entries above it, written before or after its record.
+func TestReadAllKeepsEntriesAboveOwnSnapshot(t *testing.T) {
+	snap := &walpb.Snapshot{Index: new(uint64(3)), Term: new(uint64(1)), ConfState: &raftpb.ConfState{Voters: []uint64{1}}}
+	ents := readAllFrom(t, func(w *WAL) {
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(3))}, entsOf(1, 1, 5)))
+		require.NoError(t, w.SaveSnapshot(snap))
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(4))}, entsOf(1, 6, 6)))
+	}, snap)
+	assert.Equal(t, [][2]uint64{{4, 1}, {5, 1}, {6, 1}}, entryIDs(ents))
+}
+
+// An entry written at or below the start index truncates the log there, as raft's log does: the
+// entries above the start index written before it go (here the leader of term 2 overwrote 2..3,
+// and the member snapshotted its own applied log at 3).
+func TestReadAllTruncatesAtEntryBelowStart(t *testing.T) {
+	snap := &walpb.Snapshot{Index: new(uint64(3)), Term: new(uint64(2)), ConfState: &raftpb.ConfState{Voters: []uint64{1}}}
+	ents := readAllFrom(t, func(w *WAL) {
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1))}, entsOf(1, 1, 5)))
+		require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(2)), Commit: new(uint64(3))}, entsOf(2, 2, 3)))
+		require.NoError(t, w.SaveSnapshot(snap))
+	}, snap)
+	assert.Empty(t, entryIDs(ents))
+}

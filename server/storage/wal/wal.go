@@ -487,10 +487,23 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	decoder := w.decoder
 
 	var match bool
+	// The log the records write is the log at the start snapshot's index followed by ents. An
+	// entry written at or below the start index truncates the log there, so the entries above it
+	// go; startTerm is the term of the entry the log holds at the start index, if it holds one.
+	// At the start snapshot's own record, a log whose entry at the start index has another term
+	// (or none) conflicts with the snapshot: raft discarded that log when it installed the
+	// snapshot, so its entries above the start index go too.
+	var startTerm uint64
+	var startHeld bool
 	for err = decoder.Decode(rec); err == nil; err = decoder.Decode(rec) {
 		switch rec.GetType() {
 		case EntryType:
 			e := MustUnmarshalEntry(rec.Data)
+			if e.GetIndex() <= w.start.GetIndex() {
+				ents = ents[:0]
+				startHeld = e.GetIndex() == w.start.GetIndex()
+				startTerm = e.GetTerm()
+			}
 			// 0 <= e.GetIndex()-w.start.GetIndex() - 1 < len(ents)
 			if e.GetIndex() > w.start.GetIndex() {
 				// prevent "panic: runtime error: slice bounds out of range [:13038096702221461992] with capacity 0"
@@ -536,6 +549,10 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 					return nil, state, nil, ErrSnapshotMismatch
 				}
 				match = true
+				if !startHeld || startTerm != snap.GetTerm() {
+					ents = ents[:0]
+				}
+				startHeld, startTerm = true, snap.GetTerm()
 			}
 
 		default:
