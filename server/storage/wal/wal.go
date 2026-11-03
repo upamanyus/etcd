@@ -548,6 +548,12 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 				if snap.GetIndex() > state.GetCommit() {
 					ents = ents[:0]
 				}
+				// The log's last index is at least the snapshot's: a cut names its next file after
+				// it, and a file named below the start snapshot would make a later Open start
+				// in a file without its record (which a purge may then remove).
+				if w.enti < snap.GetIndex() {
+					w.enti = snap.GetIndex()
+				}
 			}
 
 		default:
@@ -622,7 +628,16 @@ func (w *WAL) LatestSnapshotEntry() (*walpb.Snapshot, error) {
 		return &walpb.Snapshot{}, err
 	}
 
-	return walSnaps[len(walSnaps)-1], nil
+	// The record of the highest index (the last among equals), as a restart opens at
+	// (etcdserver's recoverSnapshot): the apply loop's own snapshot can be saved after a newer
+	// one the raft loop received, and a reopen at it would read back the log the newer replaced.
+	latest := walSnaps[0]
+	for _, s := range walSnaps {
+		if s.GetIndex() >= latest.GetIndex() {
+			latest = s
+		}
+	}
+	return latest, nil
 }
 
 // ValidSnapshotEntries returns all the valid snapshot entries in the wal logs in the given directory.

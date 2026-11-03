@@ -1346,3 +1346,45 @@ func TestReadAllRestoresState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(4), w2.state.GetCommit())
 }
+
+// A member restarted at a received snapshot above its log names the WAL file its next cut makes
+// after the snapshot's index: a file named below it would make a later Open start in a file
+// without the snapshot record, which the server's purge may then remove.
+func TestCutAfterRestartAtReceivedSnapshotNamesFileAboveIt(t *testing.T) {
+	dir := t.TempDir()
+	snap := &walpb.Snapshot{Index: new(uint64(5)), Term: new(uint64(2)), ConfState: &raftpb.ConfState{Voters: []uint64{1}}}
+	w, err := Create(zaptest.NewLogger(t), dir, nil)
+	require.NoError(t, err)
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(1))}, entsOf(1, 1, 3)))
+	require.NoError(t, w.SaveSnapshot(snap))
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(2)), Commit: new(uint64(5))}, nil))
+	require.NoError(t, w.Close())
+
+	w2, err := Open(zaptest.NewLogger(t), dir, snap)
+	require.NoError(t, err)
+	_, _, _, err = w2.ReadAll()
+	require.NoError(t, err)
+	require.NoError(t, w2.cut())
+	require.NoError(t, w2.Close())
+
+	names, err := readWALNames(zaptest.NewLogger(t), dir)
+	require.NoError(t, err)
+	_, idx, err := parseWALName(names[len(names)-1])
+	require.NoError(t, err)
+	assert.Greater(t, idx, uint64(5))
+}
+
+// LatestSnapshotEntry is the valid record of the highest index, not the last one.
+func TestLatestSnapshotEntryIsTheHighest(t *testing.T) {
+	dir := t.TempDir()
+	cs := &raftpb.ConfState{Voters: []uint64{1}}
+	w, err := Create(zaptest.NewLogger(t), dir, nil)
+	require.NoError(t, err)
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(5))}, entsOf(1, 1, 5)))
+	require.NoError(t, w.SaveSnapshot(&walpb.Snapshot{Index: new(uint64(5)), Term: new(uint64(1)), ConfState: cs}))
+	require.NoError(t, w.SaveSnapshot(&walpb.Snapshot{Index: new(uint64(3)), Term: new(uint64(1)), ConfState: cs}))
+	s, err := w.LatestSnapshotEntry()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), s.GetIndex())
+	require.NoError(t, w.Close())
+}
