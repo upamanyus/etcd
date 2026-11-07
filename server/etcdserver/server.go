@@ -93,10 +93,6 @@ const (
 
 	purgeFileInterval = 30 * time.Second
 
-	// maxSnapDBFiles is the maximum number of snap db files to retain.
-	// It's no longer configurable now that --max-snapshots is removed.
-	maxSnapDBFiles = 5
-
 	// max number of in-flight snapshot messages etcdserver allows to have
 	// This number is more than enough for most clusters with 5 machines.
 	maxInFlightMsgSnap = 16
@@ -604,24 +600,23 @@ func (s *EtcdServer) start() {
 	go s.run()
 }
 
+// purgeFile purges the WAL files beyond --max-wals. It does not purge
+// .snap.db files: a received snapshot's .snap.db may be waiting for the apply
+// loop to open it, and keeping only the newest few by name would delete it
+// (applySnapshot then panics). Snapshotter.ReleaseSnapDBs removes the .snap.db
+// files below a snapshot once that snapshot is applied or taken.
 func (s *EtcdServer) purgeFile() {
 	lg := s.Logger()
-	var dberrc, werrc <-chan error
-	var dbdonec, wdonec <-chan struct{}
-	dbdonec, dberrc = fileutil.PurgeFileWithoutFlock(lg, s.Cfg.SnapDir(), "snap.db", maxSnapDBFiles, purgeFileInterval, s.stopping)
+	var werrc <-chan error
+	var wdonec <-chan struct{}
 	if s.Cfg.MaxWALFiles > 0 {
 		wdonec, werrc = fileutil.PurgeFileWithDoneNotify(lg, s.Cfg.WALDir(), "wal", s.Cfg.MaxWALFiles, purgeFileInterval, s.stopping)
 	}
 
 	select {
-	case e := <-dberrc:
-		lg.Fatal("failed to purge snap db file", zap.Error(e))
 	case e := <-werrc:
 		lg.Fatal("failed to purge wal file", zap.Error(e))
 	case <-s.stopping:
-		if dbdonec != nil {
-			<-dbdonec
-		}
 		if wdonec != nil {
 			<-wdonec
 		}
