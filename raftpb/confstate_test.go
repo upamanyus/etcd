@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestConfState_Equivalent(t *testing.T) {
@@ -55,5 +57,22 @@ func TestConfState_Equivalent(t *testing.T) {
 			cs, cs2 := EnsureConfState(tc.cs), EnsureConfState(tc.cs2)
 			require.Equal(t, tc.ok, cs.Equivalent(cs2) == nil)
 		})
+	}
+}
+
+// TestConfStateEquivalentUnknownFields checks that unknown fields do not make
+// two ConfStates of the same configuration inequivalent: a conf state decoded
+// from a peer's message keeps the fields it does not know.
+func TestConfStateEquivalentUnknownFields(t *testing.T) {
+	cs := &ConfState{Voters: []uint64{1, 2}, AutoLeave: proto.Bool(false)}
+	cs.ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 99, protowire.VarintType), 1))
+	if err := cs.Equivalent(&ConfState{Voters: []uint64{2, 1}}); err != nil {
+		t.Fatalf("expected equivalent, got %v", err)
+	}
+	if err := cs.Equivalent(&ConfState{Voters: []uint64{1}}); err == nil {
+		t.Fatalf("expected not equivalent")
+	}
+	if err := cs.Equivalent(&ConfState{Voters: []uint64{1, 2}, Witness: proto.Uint64(2)}); err == nil {
+		t.Fatalf("expected a different witness not to be equivalent")
 	}
 }

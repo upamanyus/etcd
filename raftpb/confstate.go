@@ -45,8 +45,50 @@ func (cs *ConfState) Equivalent(cs2 *ConfState) error {
 		c.AutoLeave = &autoLeave
 	}
 
-	if !proto.Equal(cs1v, cs2v) {
+	// Compare the configurations, not the messages: proto.Equal also compares
+	// unknown fields, so a conf state that arrived with one (a snapshot from a
+	// peer running a newer version) would never be equivalent to the
+	// configuration it describes, and assertConfStatesEquivalent would panic.
+	if !confStatesEqual(cs1v, cs2v) {
 		return fmt.Errorf("ConfStates not equivalent after sorting:\n%+#v\n%+#v\nInputs were:\n%+#v\n%+#v", cs1v, cs2v, cs, cs2)
 	}
 	return nil
+}
+
+// confStatesEqual reports whether two ConfStates, their id slices sorted and
+// their AutoLeave set, hold the same configuration (witnesses included).
+func confStatesEqual(a, b *ConfState) bool {
+	return idsEqual(a.Voters, b.Voters) && idsEqual(a.Learners, b.Learners) &&
+		idsEqual(a.VotersOutgoing, b.VotersOutgoing) &&
+		idsEqual(a.LearnersNext, b.LearnersNext) &&
+		boolOf(a.AutoLeave) == boolOf(b.AutoLeave) &&
+		uint64Of(a.Witness) == uint64Of(b.Witness) &&
+		uint64Of(a.WitnessOutgoing) == uint64Of(b.WitnessOutgoing)
+}
+
+// uint64Of reads an optional uint64 field, an unset one as 0.
+func uint64Of(p *uint64) uint64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// boolOf reads an optional bool field, an unset one as false.
+func boolOf(p *bool) bool {
+	return p != nil && *p
+}
+
+// idsEqual reports whether two id slices hold the same ids in the same order
+// (a nil and an empty slice alike).
+func idsEqual(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
