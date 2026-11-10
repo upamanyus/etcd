@@ -1010,14 +1010,37 @@ func (r *raft) hup(t CampaignType) {
 // errBreak is a sentinel error used to break a callback-based loop.
 var errBreak = errors.New("break")
 
+// hasUnappliedConfChanges reports whether the node must not campaign because
+// its configuration may be older than the one its log commits it to: a conf
+// change in (applied, committed] is not applied yet, or the log holds more
+// than one conf change above committed.
+//
+// The leader appends a conf change only once the previous one is applied
+// (see pendingConfIndex in stepLeader), so of two conf changes in a log the
+// first is committed. A node's log therefore holds at most one conf change
+// above its commit index, unless the commit index is lower than the one the
+// node had before a restart: the application persisted a Ready's entries but
+// crashed before persisting its HardState. Then the first of the two is
+// committed by the cluster although the node does not know it, and campaigning
+// in the configuration before it would let the node win in a configuration two
+// changes older than the cluster's, whose majorities need not overlap.
+//
+// With DisableConfChangeValidation the leader does not enforce one pending
+// conf change at a time, so only the committed entries are checked.
 func (r *raft) hasUnappliedConfChanges() bool {
-	if r.raftLog.applied >= r.raftLog.committed { // in fact applied == committed
+	committed := r.raftLog.committed
+	hi := committed + 1
+	if !r.disableConfChangeValidation {
+		hi = r.raftLog.lastIndex() + 1
+	}
+	lo := r.raftLog.applied + 1
+	if lo >= hi {
 		return false
 	}
 	found := false
-	// Scan all unapplied committed entries to find a config change. Paginate the
-	// scan, to avoid a potentially unlimited memory spike.
-	lo, hi := r.raftLog.applied+1, r.raftLog.committed+1
+	confAboveCommit := false
+	// Scan all unapplied entries to find a config change. Paginate the scan, to
+	// avoid a potentially unlimited memory spike.
 	// Reuse the maxApplyingEntsSize limit because it is used for similar purposes
 	// (limiting the read of unapplied committed entries) when raft sends entries
 	// via the Ready struct for application.
@@ -1027,8 +1050,11 @@ func (r *raft) hasUnappliedConfChanges() bool {
 	if err := r.raftLog.scan(lo, hi, pageSize, func(ents []*pb.Entry) error {
 		for i := range ents {
 			if ents[i].GetType() == pb.EntryConfChange || ents[i].GetType() == pb.EntryConfChangeV2 {
-				found = true
-				return errBreak
+				if ents[i].GetIndex() <= committed || confAboveCommit {
+					found = true
+					return errBreak
+				}
+				confAboveCommit = true
 			}
 		}
 		return nil
