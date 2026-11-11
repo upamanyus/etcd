@@ -622,6 +622,16 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 		if err = fileutil.Fdatasync(w.tail().File); err != nil {
 			return nil, state, nil, err
 		}
+		// Make the names this WAL was read through durable before anything is appended: a
+		// process killed between a rename and its directory sync (Create's rename of the
+		// temporary directory, a cut's rename of the new segment) leaves the new name in the
+		// page cache only, and a power loss after records are synced into the WAL would lose it.
+		if err = fileutil.Fsync(w.dirFile); err != nil {
+			return nil, state, nil, err
+		}
+		if err = syncDir(filepath.Dir(w.dir)); err != nil {
+			return nil, state, nil, err
+		}
 	}
 
 	err = nil

@@ -1388,3 +1388,34 @@ func TestLatestSnapshotEntryIsTheHighest(t *testing.T) {
 	assert.Equal(t, uint64(5), s.GetIndex())
 	require.NoError(t, w.Close())
 }
+
+// TestReadAllSyncsDirs: ReadAll in write mode fsyncs the WAL directory and its parent (a process
+// killed between Create's or a cut's rename and its directory sync leaves the new name in the page
+// cache only; a test cannot observe the sync without a power loss). The WAL stays usable, also
+// when its directory is a relative path whose parent is ".".
+func TestReadAllSyncsDirs(t *testing.T) {
+	t.Chdir(t.TempDir())
+	w, err := Create(zaptest.NewLogger(t), "wal", nil)
+	require.NoError(t, err)
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(1))},
+		[]*raftpb.Entry{{Index: new(uint64(1)), Term: new(uint64(1))}}))
+	require.NoError(t, w.Close())
+
+	w, err = Open(zaptest.NewLogger(t), "wal", &walpb.Snapshot{})
+	require.NoError(t, err)
+	_, _, ents, err := w.ReadAll()
+	require.NoError(t, err)
+	require.Len(t, ents, 1)
+	require.NoError(t, w.Save(&raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(2))},
+		[]*raftpb.Entry{{Index: new(uint64(2)), Term: new(uint64(1))}}))
+	require.NoError(t, w.Close())
+
+	// a failed sync of the WAL directory fails ReadAll rather than returning a WAL whose names may
+	// not be durable
+	w, err = Open(zaptest.NewLogger(t), "wal", &walpb.Snapshot{})
+	require.NoError(t, err)
+	require.NoError(t, w.dirFile.Close())
+	_, _, _, err = w.ReadAll()
+	require.Error(t, err)
+	w.Close() // its directory file is already closed: the error is expected
+}
