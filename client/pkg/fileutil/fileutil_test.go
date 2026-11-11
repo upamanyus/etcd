@@ -177,3 +177,23 @@ func TestTouchDirAll(t *testing.T) {
 
 	assert.NoError(t, TouchDirAll(zaptest.NewLogger(t), tmpdir))
 }
+
+// TestTouchDirAllNested: TouchDirAll creates every missing level (and syncs each new
+// directory's parent, which a test cannot observe without a power loss).
+func TestTouchDirAllNested(t *testing.T) {
+	tmpdir := t.TempDir()
+	dir := filepath.Join(tmpdir, "a", "b", "c")
+	require.NoError(t, TouchDirAll(zaptest.NewLogger(t), dir))
+	for _, d := range []string{"a", "a/b", "a/b/c"} {
+		fi, err := os.Stat(filepath.Join(tmpdir, d))
+		require.NoError(t, err)
+		require.True(t, fi.IsDir())
+	}
+	// existing directories: nothing to create
+	require.NoError(t, TouchDirAll(zaptest.NewLogger(t), dir))
+	// a relative path
+	t.Chdir(tmpdir)
+	require.NoError(t, TouchDirAll(zaptest.NewLogger(t), filepath.Join("x", "y")))
+	_, err := os.Stat(filepath.Join(tmpdir, "x", "y"))
+	require.NoError(t, err)
+}

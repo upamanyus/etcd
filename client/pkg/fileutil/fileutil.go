@@ -56,15 +56,44 @@ func TouchDirAll(lg *zap.Logger, dir string) error {
 			lg.Warn("check file permission", zap.Error(err))
 		}
 	} else {
+		// the directories MkdirAll creates, outermost first
+		var created []string
+		for d := filepath.Clean(dir); !Exist(d); d = filepath.Dir(d) {
+			created = append([]string{d}, created...)
+			if filepath.Dir(d) == d {
+				break
+			}
+		}
 		err := os.MkdirAll(dir, PrivateDirMode)
 		if err != nil {
 			// if mkdirAll("a/text") and "text" is not
 			// a directory, this will return syscall.ENOTDIR
 			return err
 		}
+		// A new directory's entry is durable only once its parent is synced: without this, a
+		// power loss can lose a data directory that later fsyncs (of files inside it) were
+		// assumed to have made durable.
+		for _, d := range created {
+			if err = syncDir(filepath.Dir(d)); err != nil {
+				return err
+			}
+		}
 	}
 
 	return IsDirWriteable(dir)
+}
+
+// syncDir fsyncs the directory dir.
+func syncDir(dir string) error {
+	df, err := OpenDir(dir)
+	if err != nil {
+		return err
+	}
+	if err = Fsync(df); err != nil {
+		df.Close()
+		return err
+	}
+	return df.Close()
 }
 
 // CreateDirAll is similar to TouchDirAll but returns error
