@@ -197,3 +197,17 @@ func TestTouchDirAllNested(t *testing.T) {
 	_, err := os.Stat(filepath.Join(tmpdir, "x", "y"))
 	require.NoError(t, err)
 }
+
+// TestTouchDirAllExisting: TouchDirAll of an existing directory also syncs its parent (a process
+// killed after creating it may not have; a test cannot observe the sync without a power loss), for
+// an absolute path and for a relative one whose parent is ".".
+func TestTouchDirAllExisting(t *testing.T) {
+	tmpdir := t.TempDir()
+	dir := filepath.Join(tmpdir, "a")
+	require.NoError(t, os.Mkdir(dir, PrivateDirMode))
+	require.NoError(t, TouchDirAll(zaptest.NewLogger(t), dir))
+	t.Chdir(tmpdir)
+	require.NoError(t, TouchDirAll(zaptest.NewLogger(t), "a"))
+	// the parent must be openable: a missing parent is an error, not a silent skip
+	require.Error(t, syncDir(filepath.Join(tmpdir, "missing")))
+}

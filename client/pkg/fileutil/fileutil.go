@@ -55,6 +55,12 @@ func TouchDirAll(lg *zap.Logger, dir string) error {
 		if err != nil {
 			lg.Warn("check file permission", zap.Error(err))
 		}
+		// The directory may have been created by a process killed before it synced the parent:
+		// its entry is then in the page cache only, and a power loss after this call returns
+		// would lose it with everything later made durable inside it. Sync the parent here too.
+		if err = syncDir(filepath.Dir(filepath.Clean(dir))); err != nil {
+			return err
+		}
 	} else {
 		// the directories MkdirAll creates, outermost first
 		var created []string
