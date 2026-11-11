@@ -589,6 +589,13 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 		if err = fileutil.ZeroToEnd(w.tail().File); err != nil {
 			return nil, state, nil, err
 		}
+		// Make the zeroing durable before any new record is written over it. Otherwise a
+		// power loss after a new record (byte-identical to the stale one at that offset, as when
+		// a leader re-sends the lost entries) can keep that record and lose the zeroing, and the
+		// stale records after it pass the CRC chain again.
+		if err = fileutil.Fdatasync(w.tail().File); err != nil {
+			return nil, state, nil, err
+		}
 	}
 
 	err = nil
