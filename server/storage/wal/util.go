@@ -17,6 +17,7 @@ package wal
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"go.uber.org/zap"
@@ -27,10 +28,15 @@ import (
 var errBadWALName = errors.New("bad wal name")
 
 // Exist returns true if there are any files in a given directory.
+//
+// It returns false only when the directory holds no such file or does not
+// exist. Any other error reading the directory (EMFILE, ENOMEM, EIO, EACCES,
+// ...) gives true: the WAL may be there, and a caller that took it as absent
+// would bootstrap a new member over it (Create would remove it).
 func Exist(dir string) bool {
 	names, err := fileutil.ReadDir(dir, fileutil.WithExt(".wal"))
 	if err != nil {
-		return false
+		return !errors.Is(err, os.ErrNotExist)
 	}
 	return len(names) != 0
 }
