@@ -181,6 +181,19 @@ func Create(lg *zap.Logger, dirpath string, metadata []byte) (_ *WAL, retErr err
 		return nil, err
 	}
 
+	// Make the first WAL file's entry in the temporary directory durable before the rename
+	// publishes the directory: syncing the parent after the rename (below) makes the new name
+	// durable, not the entries of the renamed directory, so a power loss could leave an empty
+	// WAL directory, which Exist reports as no WAL.
+	if err = syncDir(tmpdirpath); err != nil {
+		lg.Warn(
+			"failed to fsync the temporary WAL directory",
+			zap.String("tmp-dir-path", tmpdirpath),
+			zap.Error(err),
+		)
+		return nil, err
+	}
+
 	logDirPath := w.dir
 	if w, err = w.renameWAL(tmpdirpath); err != nil {
 		lg.Warn(
@@ -291,6 +304,19 @@ func (w *WAL) cleanupWAL(lg *zap.Logger) {
 			zap.String("rename-path", brokenDirName),
 		)
 	}
+}
+
+// syncDir fsyncs the directory dir.
+func syncDir(dir string) error {
+	df, err := fileutil.OpenDir(dir)
+	if err != nil {
+		return err
+	}
+	if err = fileutil.Fsync(df); err != nil {
+		df.Close()
+		return err
+	}
+	return df.Close()
 }
 
 func (w *WAL) renameWAL(tmpdirpath string) (*WAL, error) {
