@@ -90,6 +90,7 @@ type WAL struct {
 
 	mu      sync.Mutex
 	enti    uint64   // index of the last entry saved to the wal
+	snapi   uint64   // the highest snapshot index saved to or read from the wal
 	encoder *encoder // encoder to encode records
 
 	locks []*fileutil.LockedFile // the locked files the WAL holds (the name is increasing)
@@ -565,6 +566,9 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 		case SnapshotType:
 			var snap walpb.Snapshot
 			pbutil.MustUnmarshalMessage(&snap, rec.Data)
+			if w.snapi < snap.GetIndex() {
+				w.snapi = snap.GetIndex()
+			}
 			if snap.GetIndex() == w.start.GetIndex() {
 				if snap.GetTerm() != w.start.GetTerm() {
 					state.Reset()
@@ -883,7 +887,15 @@ func (w *WAL) cut() error {
 		return err
 	}
 
-	fpath := filepath.Join(w.dir, walName(w.seq()+1, w.enti+1))
+	// Name the segment above every snapshot record before it, not only above the last entry: an
+	// entry saved below a snapshot after its record (a follower that crashed before committing a
+	// received snapshot, then saved the re-sent entries) would otherwise name a segment at or below
+	// the snapshot, and a later Open at the snapshot would start after its record.
+	next := w.enti
+	if next < w.snapi {
+		next = w.snapi
+	}
+	fpath := filepath.Join(w.dir, walName(w.seq()+1, next+1))
 
 	// create a temp wal file with name sequence + 1, or truncate the existing one
 	newTail, err := w.fp.Open()
@@ -1138,6 +1150,9 @@ func (w *WAL) SaveSnapshot(e *walpb.Snapshot) error {
 	rec := &walpb.Record{Type: new(SnapshotType), Data: b}
 	if err := w.encoder.encode(rec); err != nil {
 		return err
+	}
+	if w.snapi < e.GetIndex() {
+		w.snapi = e.GetIndex()
 	}
 	// update enti only when snapshot is ahead of last index
 	if w.enti < e.GetIndex() {
