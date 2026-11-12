@@ -662,6 +662,12 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	}
 	w.decoder = nil
 
+	// newFileEncoder's nil error must not hide that the start snapshot was not found: in write mode
+	// too, a WAL read without its start snapshot's record is not known to be consistent with it.
+	if err == nil && !match {
+		err = ErrSnapshotNotFound
+	}
+
 	return metadata, state, ents, err
 }
 
