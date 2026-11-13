@@ -15,7 +15,10 @@
 package wal
 
 import (
+	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"go.uber.org/zap/zaptest"
@@ -43,5 +46,38 @@ func TestFilePipelineFailPreallocate(t *testing.T) {
 	f, ferr := fp.Open()
 	if f != nil || ferr == nil { // no space left on device
 		t.Fatal("expected error on invalid pre-allocate size, but no error")
+	}
+}
+
+// TestFilePipelineTruncatesStaleTmp: a 0.tmp left by an interrupted cut is
+// reused empty: every byte of the preallocated file is zero.
+func TestFilePipelineTruncatesStaleTmp(t *testing.T) {
+	tdir := t.TempDir()
+	stale := bytes.Repeat([]byte{0xab}, 4096)
+	if err := os.WriteFile(filepath.Join(tdir, "0.tmp"), stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	size := int64(64 * 1024)
+	fp := newFilePipeline(zaptest.NewLogger(t), tdir, size)
+	defer fp.Close()
+
+	f, ferr := fp.Open()
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	name := f.Name()
+	f.Close()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(b)) != size {
+		t.Fatalf("size %d, want %d", len(b), size)
+	}
+	for i, c := range b {
+		if c != 0 {
+			t.Fatalf("stale byte %#x at offset %d of the reused %s", c, i, filepath.Base(name))
+		}
 	}
 }
