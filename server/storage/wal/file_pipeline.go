@@ -75,7 +75,10 @@ func (fp *filePipeline) Close() error {
 func (fp *filePipeline) alloc() (f *fileutil.LockedFile, err error) {
 	// count % 2 so this file isn't the same as the one last published
 	fpath := filepath.Join(fp.dir, fmt.Sprintf("%d.tmp", fp.count%2))
-	if f, err = createNewWALFile[*fileutil.LockedFile](fpath, false); err != nil {
+	// Truncate: a cut interrupted by a crash leaves its headers in N.tmp. Kept, they
+	// would lie after the next cut's (possibly shorter) headers, under the records
+	// appended later, where a torn write could combine them with the new bytes.
+	if f, err = createNewWALFile[*fileutil.LockedFile](fpath, true); err != nil {
 		return nil, err
 	}
 	if err = fileutil.Preallocate(f.File, fp.size, true); err != nil {
