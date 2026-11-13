@@ -31,9 +31,11 @@ import (
 var ErrNoDBSnapshot = errors.New("snap: snapshot file doesn't exist")
 
 // SaveDBFrom atomically saves a database snapshot from r. Before a successful
-// return, it syncs the file and containing directory so the rename is durable
+// return, it syncs the file and containing directory so the link is durable
 // on storage that honors fsync. The receiver processes the Raft message only
-// afterward, so its WAL snapshot record cannot precede snap.db.
+// afterward, so its WAL snapshot record cannot precede snap.db. If the
+// snapshot of id already exists, SaveDBFrom keeps it and discards r's copy,
+// also when another SaveDBFrom of id puts it in place concurrently.
 func (s *Snapshotter) SaveDBFrom(r io.Reader, id uint64) (int64, error) {
 	start := time.Now()
 
@@ -54,24 +56,26 @@ func (s *Snapshotter) SaveDBFrom(r io.Reader, id uint64) (int64, error) {
 		return n, err
 	}
 	fn := s.dbFilePath(id)
-	if fileutil.Exist(fn) {
-		os.Remove(f.Name())
-		// A prior SaveDBFrom can have renamed this file and crashed before
+	// Link, not rename: a link never replaces an existing file, so of two
+	// concurrent saves of one index exactly one puts its file in place and the
+	// other keeps it, with no window between a check and a rename.
+	err = os.Link(f.Name(), fn)
+	os.Remove(f.Name())
+	if errors.Is(err, os.ErrExist) {
+		// A prior SaveDBFrom can have linked this file and crashed before
 		// syncing the directory. Sync again before reporting success.
 		if err = s.fsyncDir(s.dir); err != nil {
 			return n, err
 		}
 		return n, nil
 	}
-	err = os.Rename(f.Name(), fn)
 	if err != nil {
-		os.Remove(f.Name())
 		return n, err
 	}
 
 	// gofail: var snapDBRenameBeforeDirSync struct{}
 
-	// The file is synced above. Sync the directory to make the renamed entry
+	// The file is synced above. Sync the directory to make the linked entry
 	// durable before the snapshot receiver processes the Raft message.
 	if err = s.fsyncDir(s.dir); err != nil {
 		s.lg.Warn(
