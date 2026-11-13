@@ -209,7 +209,9 @@ func Create(lg *zap.Logger, dirpath string, metadata []byte) (_ *WAL, retErr err
 	var perr error
 	defer func() {
 		if perr != nil {
-			w.cleanupWAL(lg)
+			if cerr := w.cleanupWAL(lg); cerr != nil {
+				retErr = fmt.Errorf("%w (after: %v)", cerr, perr)
+			}
 		}
 	}()
 	// directory was renamed; sync parent dir to persist rename
@@ -291,20 +293,25 @@ func (w *WAL) SetUnsafeNoFsync() {
 	w.unsafeNoSync = true
 }
 
-func (w *WAL) cleanupWAL(lg *zap.Logger) {
+// cleanupWAL closes the WAL and moves its directory aside, to "<dir>.broken.<timestamp>". It
+// returns the error of the close or of the rename (the directory then keeps its name).
+func (w *WAL) cleanupWAL(lg *zap.Logger) error {
 	var err error
 	if err = w.Close(); err != nil {
-		lg.Panic("failed to close WAL during cleanup", zap.Error(err))
+		lg.Warn("failed to close WAL during cleanup", zap.Error(err))
+		return err
 	}
 	brokenDirName := fmt.Sprintf("%s.broken.%v", w.dir, time.Now().Format("20060102.150405.999999"))
 	if err = os.Rename(w.dir, brokenDirName); err != nil {
-		lg.Panic(
+		lg.Warn(
 			"failed to rename WAL during cleanup",
 			zap.Error(err),
 			zap.String("source-path", w.dir),
 			zap.String("rename-path", brokenDirName),
 		)
+		return err
 	}
+	return nil
 }
 
 // syncDir fsyncs the directory dir.
