@@ -42,19 +42,24 @@ func (fr *fileReader) FileInfo() (fs.FileInfo, error) {
 // FileBufReader is a wrapper of bufio.Reader. It also provides file info.
 type FileBufReader struct {
 	*bufio.Reader
-	fi fs.FileInfo
+	fi  fs.FileInfo
+	err error
 }
 
+// NewFileBufReader wraps fr in a buffered reader and takes its file info. If fr.FileInfo fails
+// (an fstat error), the error is kept: Err returns it, and FileInfo returns nil.
 func NewFileBufReader(fr FileReader) *FileBufReader {
 	bufReader := bufio.NewReader(fr)
 	fi, err := fr.FileInfo()
-	if err != nil {
-		// This should never happen.
-		panic(err)
-	}
-	return &FileBufReader{bufReader, fi}
+	return &FileBufReader{bufReader, fi, err}
 }
 
+// FileInfo returns the file info taken by NewFileBufReader, nil if Err is not nil.
 func (fbr *FileBufReader) FileInfo() fs.FileInfo {
 	return fbr.fi
+}
+
+// Err returns the error of taking the file info in NewFileBufReader, if any.
+func (fbr *FileBufReader) Err() error {
+	return fbr.err
 }

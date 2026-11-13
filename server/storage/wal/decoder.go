@@ -91,6 +91,9 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 	}
 
 	fileBufReader := d.brs[0]
+	if err := fileBufReader.Err(); err != nil {
+		return err
+	}
 	l, err := readInt64(fileBufReader)
 	if errors.Is(err, io.EOF) || (err == nil && l == 0) {
 		// hit end of file or preallocated space

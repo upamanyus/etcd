@@ -42,3 +42,20 @@ func TestFileBufReader(t *testing.T) {
 	assert.Equal(t, fi.Mode(), fbr.FileInfo().Mode())
 	assert.Equal(t, fi.ModTime(), fbr.FileInfo().ModTime())
 }
+
+// TestFileBufReaderStatError: a FileReader whose file info fails (here: an already closed file)
+// gives a FileBufReader reporting the error from Err, instead of a panic.
+func TestFileBufReaderStatError(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	var fbr *FileBufReader
+	assert.NotPanics(t, func() { fbr = NewFileBufReader(NewFileReader(f)) })
+	assert.ErrorIs(t, fbr.Err(), os.ErrClosed)
+	assert.Nil(t, fbr.FileInfo())
+}
