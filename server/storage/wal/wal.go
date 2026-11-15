@@ -1001,6 +1001,8 @@ func (w *WAL) sync() error {
 }
 
 func (w *WAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.sync()
 }
 
