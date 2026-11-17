@@ -18,8 +18,6 @@ import (
 	"errors"
 	"sync"
 
-	"google.golang.org/protobuf/proto"
-
 	pb "go.etcd.io/raft/v3/raftpb"
 )
 
@@ -210,7 +208,7 @@ func (ms *MemoryStorage) Snapshot() (*pb.Snapshot, error) {
 	defer ms.Unlock()
 	ms.callStats.snapshot++
 	ms.snapshot = pb.EnsureSnapshot(ms.snapshot)
-	return proto.Clone(ms.snapshot).(*pb.Snapshot), nil
+	return pb.CloneSnapshot(ms.snapshot), nil
 }
 
 // ApplySnapshot overwrites the contents of this Storage object with
@@ -231,7 +229,7 @@ func (ms *MemoryStorage) ApplySnapshot(snap *pb.Snapshot) error {
 		return ErrSnapOutOfDate
 	}
 
-	ms.snapshot = proto.Clone(snap).(*pb.Snapshot)
+	ms.snapshot = pb.CloneSnapshot(snap)
 	ms.ents = []*pb.Entry{{Term: new(snap.GetMetadata().GetTerm()), Index: new(snap.GetMetadata().GetIndex())}}
 	return nil
 }
@@ -256,10 +254,10 @@ func (ms *MemoryStorage) CreateSnapshot(i uint64, cs *pb.ConfState, data []byte)
 	ms.snapshot.Metadata.Index = new(i)
 	ms.snapshot.Metadata.Term = new(ms.ents[i-offset].GetTerm())
 	if cs != nil {
-		ms.snapshot.Metadata.ConfState = proto.Clone(cs).(*pb.ConfState)
+		ms.snapshot.Metadata.ConfState = pb.CloneConfState(cs)
 	}
 	ms.snapshot.Data = data
-	return proto.Clone(ms.snapshot).(*pb.Snapshot), nil
+	return pb.CloneSnapshot(ms.snapshot), nil
 }
 
 // Compact discards all log entries prior to compactIndex.

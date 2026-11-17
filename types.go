@@ -15,7 +15,7 @@
 package raft
 
 import (
-	"fmt"
+	"errors"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 )
@@ -95,12 +95,12 @@ func (s logSlice) valid() error {
 	for i := range s.entries {
 		id := pbEntryID(s.entries[i])
 		if id.term < prev.term || id.index != prev.index+1 {
-			return fmt.Errorf("leader term %d: entries %+v and %+v not consistent", s.term, prev, id)
+			return errors.New("log slice entries not consistent")
 		}
 		prev = id
 	}
 	if s.term < prev.term {
-		return fmt.Errorf("leader term %d: entry %+v has a newer term", s.term, prev)
+		return errors.New("log slice entry has a newer term than the leader term")
 	}
 	return nil
 }

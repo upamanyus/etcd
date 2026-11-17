@@ -164,7 +164,7 @@ func (c Changer) apply(cfg *tracker.Config, trk tracker.ProgressMap, ccs ...*pb.
 			c.remove(cfg, trk, cc.GetNodeId())
 		case pb.ConfChangeUpdateNode:
 		default:
-			return fmt.Errorf("unexpected conf type %d", cc.GetType())
+			return errors.New("unexpected conf type")
 		}
 	}
 	if len(incoming(cfg.Voters)) == 0 {
@@ -287,7 +287,7 @@ func checkInvariants(cfg tracker.Config, trk tracker.ProgressMap) error {
 	} {
 		for id := range ids {
 			if _, ok := trk[id]; !ok {
-				return fmt.Errorf("no progress for %d", id)
+				return errors.New("a node of the configuration has no progress")
 			}
 		}
 	}
@@ -296,35 +296,35 @@ func checkInvariants(cfg tracker.Config, trk tracker.ProgressMap) error {
 	// to a conflicting voter in the outgoing config.
 	for id := range cfg.LearnersNext {
 		if _, ok := outgoing(cfg.Voters)[id]; !ok {
-			return fmt.Errorf("%d is in LearnersNext, but not Voters[1]", id)
+			return errors.New("a node is in LearnersNext, but not Voters[1]")
 		}
 		if trk[id].IsLearner {
-			return fmt.Errorf("%d is in LearnersNext, but is already marked as learner", id)
+			return errors.New("a node is in LearnersNext, but is already marked as learner")
 		}
 	}
 	// Conversely Learners and Voters doesn't intersect at all.
 	for id := range cfg.Learners {
 		if _, ok := outgoing(cfg.Voters)[id]; ok {
-			return fmt.Errorf("%d is in Learners and Voters[1]", id)
+			return errors.New("a node is in Learners and Voters[1]")
 		}
 		if _, ok := incoming(cfg.Voters)[id]; ok {
-			return fmt.Errorf("%d is in Learners and Voters[0]", id)
+			return errors.New("a node is in Learners and Voters[0]")
 		}
 		if !trk[id].IsLearner {
-			return fmt.Errorf("%d is in Learners, but is not marked as learner", id)
+			return errors.New("a node is in Learners, but is not marked as learner")
 		}
 	}
 
 	if !joint(cfg) {
 		// We enforce that empty maps are nil instead of zero.
 		if outgoing(cfg.Voters) != nil {
-			return fmt.Errorf("cfg.Voters[1] must be nil when not joint")
+			return errors.New("cfg.Voters[1] must be nil when not joint")
 		}
 		if cfg.LearnersNext != nil {
-			return fmt.Errorf("cfg.LearnersNext must be nil when not joint")
+			return errors.New("cfg.LearnersNext must be nil when not joint")
 		}
 		if cfg.AutoLeave {
-			return fmt.Errorf("AutoLeave must be false when not joint")
+			return errors.New("AutoLeave must be false when not joint")
 		}
 	}
 

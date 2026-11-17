@@ -15,21 +15,19 @@
 package raftpb
 
 import (
-	"fmt"
+	"errors"
 	"slices"
-
-	"google.golang.org/protobuf/proto"
 )
 
 // Equivalent returns a nil error if the inputs describe the same configuration.
 // On mismatch, returns a descriptive error showing the differences.
 func (cs *ConfState) Equivalent(cs2 *ConfState) error {
 	if cs == nil || cs2 == nil {
-		return fmt.Errorf("cannot compare ConfState: nil input (left=%v, right=%v)", cs == nil, cs2 == nil)
+		return errors.New("cannot compare ConfState: nil input")
 	}
 
-	cs1v := proto.Clone(cs).(*ConfState)
-	cs2v := proto.Clone(cs2).(*ConfState)
+	cs1v := CloneConfState(cs)
+	cs2v := CloneConfState(cs2)
 
 	s := func(sl *[]uint64) {
 		slices.Sort(*sl)
@@ -50,7 +48,7 @@ func (cs *ConfState) Equivalent(cs2 *ConfState) error {
 	// peer running a newer version) would never be equivalent to the
 	// configuration it describes, and assertConfStatesEquivalent would panic.
 	if !confStatesEqual(cs1v, cs2v) {
-		return fmt.Errorf("ConfStates not equivalent after sorting:\n%+#v\n%+#v\nInputs were:\n%+#v\n%+#v", cs1v, cs2v, cs, cs2)
+		return errors.New("ConfStates not equivalent after sorting")
 	}
 	return nil
 }

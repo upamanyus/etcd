@@ -15,9 +15,8 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
-
-	"google.golang.org/protobuf/proto"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 )
@@ -292,7 +291,7 @@ func (l *raftLog) hasNextOrInProgressSnapshot() bool {
 
 func (l *raftLog) snapshot() (*pb.Snapshot, error) {
 	if l.unstable.snapshot != nil {
-		return proto.Clone(l.unstable.snapshot).(*pb.Snapshot), nil
+		return pb.CloneSnapshot(l.unstable.snapshot), nil
 	}
 	return l.storage.Snapshot()
 }
@@ -485,7 +484,7 @@ func (l *raftLog) scan(lo, hi uint64, pageSize entryEncodingSize, v func([]*pb.E
 		if err != nil {
 			return err
 		} else if len(ents) == 0 {
-			return fmt.Errorf("got 0 entries in [%d, %d)", lo, hi)
+			return errors.New("got 0 entries in a non-empty index range")
 		}
 		if err := v(ents); err != nil {
 			return err

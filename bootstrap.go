@@ -17,8 +17,6 @@ package raft
 import (
 	"errors"
 
-	"google.golang.org/protobuf/proto"
-
 	pb "go.etcd.io/raft/v3/raftpb"
 )
 
@@ -53,10 +51,7 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	ents := make([]*pb.Entry, len(peers))
 	for i, peer := range peers {
 		cc := &pb.ConfChange{Type: pb.ConfChangeAddNode.Enum(), NodeId: new(peer.ID), Context: peer.Context}
-		data, err := proto.Marshal(cc)
-		if err != nil {
-			return err
-		}
+		data := pb.MarshalConfChangeV1(cc)
 
 		ents[i] = &pb.Entry{Type: pb.EntryConfChange.Enum(), Term: new(uint64(1)), Index: new(uint64(i + 1)), Data: data}
 	}

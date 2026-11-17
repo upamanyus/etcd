@@ -15,11 +15,10 @@
 package raftpb
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-
-	"google.golang.org/protobuf/proto"
 )
 
 // ConfChangeI abstracts over ConfChangeV2 and (legacy) ConfChange to allow
@@ -45,11 +44,11 @@ func MarshalConfChange(c ConfChangeI) (EntryType, []byte, error) {
 		ccdata = nil
 	} else if ccv1, ok := c.AsV1(); ok {
 		typ = EntryConfChange
-		ccdata, err = proto.Marshal(ccv1)
+		ccdata = MarshalConfChangeV1(ccv1)
 	} else {
 		ccv2 := c.AsV2()
 		typ = EntryConfChangeV2
-		ccdata, err = proto.Marshal(ccv2)
+		ccdata = MarshalConfChangeV2(ccv2)
 	}
 	return typ, ccdata, err
 }
@@ -127,7 +126,7 @@ func ConfChangesFromString(s string) ([]*ConfChangeSingle, error) {
 	}
 	for _, tok := range toks {
 		if len(tok) < 2 {
-			return nil, fmt.Errorf("unknown token %s", tok)
+			return nil, errors.New("unknown token")
 		}
 		cc := &ConfChangeSingle{}
 		switch tok[0] {
@@ -140,7 +139,7 @@ func ConfChangesFromString(s string) ([]*ConfChangeSingle, error) {
 		case 'u':
 			cc.Type = ConfChangeUpdateNode.Enum()
 		default:
-			return nil, fmt.Errorf("unknown input: %s", tok)
+			return nil, errors.New("unknown input")
 		}
 		id, err := strconv.ParseUint(tok[1:], 10, 64)
 		if err != nil {

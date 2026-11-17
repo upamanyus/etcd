@@ -22,10 +22,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
-	"strings"
 	"sync"
-
-	"google.golang.org/protobuf/proto"
 
 	"go.etcd.io/raft/v3/confchange"
 	"go.etcd.io/raft/v3/quorum"
@@ -486,14 +483,9 @@ func newRaft(c *Config) *raft {
 	}
 	r.becomeFollower(r.Term, None)
 
-	var nodesStrs []string
-	for _, n := range r.trk.VoterNodes() {
-		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
-	}
-
 	// TODO(pav-kv): it should be ok to simply print %+v for lastID.
 	r.logger.Infof("newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
-		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, lastID.index, lastID.term)
+		r.id, hexIDs(r.trk.VoterNodes()), r.Term, r.raftLog.committed, r.raftLog.applied, lastID.index, lastID.term)
 	return r
 }
 
@@ -832,7 +824,7 @@ func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 	cloned := make([]*pb.Entry, len(es))
 	for i := range es {
 		// TODO: Consider whether cloning/copying is necessary at all, and aim to eliminate it if possible.
-		cloned[i] = proto.Clone(es[i]).(*pb.Entry)
+		cloned[i] = pb.CloneEntry(es[i])
 		cloned[i].Term = new(r.Term)
 		cloned[i].Index = new(li + 1 + uint64(i))
 	}
@@ -1329,13 +1321,13 @@ func stepLeader(r *raft, m *pb.Message) error {
 			var cc pb.ConfChangeI
 			if e.GetType() == pb.EntryConfChange {
 				ccc := &pb.ConfChange{}
-				if err := proto.Unmarshal(e.GetData(), ccc); err != nil {
+				if err := pb.UnmarshalConfChangeV1(e.GetData(), ccc); err != nil {
 					panic(err)
 				}
 				cc = ccc
 			} else if e.GetType() == pb.EntryConfChangeV2 {
 				ccc := &pb.ConfChangeV2{}
-				if err := proto.Unmarshal(e.GetData(), ccc); err != nil {
+				if err := pb.UnmarshalConfChangeV2(e.GetData(), ccc); err != nil {
 					panic(err)
 				}
 				cc = ccc
@@ -1345,17 +1337,17 @@ func stepLeader(r *raft, m *pb.Message) error {
 				alreadyJoint := len(r.trk.Config.Voters[1]) > 0
 				wantsLeaveJoint := len(cc.AsV2().Changes) == 0
 
-				var failedCheck string
+				var failedCheck fmt.Stringer
 				if alreadyPending {
-					failedCheck = fmt.Sprintf("possible unapplied conf change at index %d (applied to %d)", r.pendingConfIndex, r.raftLog.applied)
+					failedCheck = lazySprintf{"possible unapplied conf change at index %d (applied to %d)", []any{r.pendingConfIndex, r.raftLog.applied}}
 				} else if alreadyJoint && !wantsLeaveJoint {
-					failedCheck = "must transition out of joint config first"
+					failedCheck = lazySprintf{"must transition out of joint config first", nil}
 				} else if !alreadyJoint && wantsLeaveJoint {
-					failedCheck = "not in joint state; refusing empty conf change"
+					failedCheck = lazySprintf{"not in joint state; refusing empty conf change", nil}
 				}
 
-				if failedCheck != "" && !r.disableConfChangeValidation {
-					r.logger.Infof("%x ignoring conf change %s at config %s: %s", r.id, DescribeConfChange(cc), r.trk.Config, failedCheck)
+				if failedCheck != nil && !r.disableConfChangeValidation {
+					r.logger.Infof("%x ignoring conf change %s at config %s: %s", r.id, describedConfChange{cc}, r.trk.Config, failedCheck)
 					m.GetEntries()[i] = &pb.Entry{Type: pb.EntryNormal.Enum()}
 				} else {
 					r.pendingConfIndex = r.raftLog.lastIndex() + uint64(i) + 1

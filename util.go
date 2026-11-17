@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/protobuf/proto"
-
 	pb "go.etcd.io/raft/v3/raftpb"
 )
 
@@ -222,14 +220,14 @@ func DescribeEntry(e *pb.Entry, f EntryFormatter) string {
 		formatted = f(e.GetData())
 	case pb.EntryConfChange:
 		cc := &pb.ConfChange{}
-		if err := proto.Unmarshal(e.GetData(), cc); err != nil {
+		if err := pb.UnmarshalConfChangeV1(e.GetData(), cc); err != nil {
 			formatted = err.Error()
 		} else {
 			formatted = formatConfChange(cc)
 		}
 	case pb.EntryConfChangeV2:
 		cc := &pb.ConfChangeV2{}
-		if err := proto.Unmarshal(e.GetData(), cc); err != nil {
+		if err := pb.UnmarshalConfChangeV2(e.GetData(), cc); err != nil {
 			formatted = err.Error()
 		} else {
 			formatted = formatConfChange(cc)
@@ -274,7 +272,7 @@ type entryEncodingSize uint64
 func entsSize(ents []*pb.Entry) entryEncodingSize {
 	var size entryEncodingSize
 	for _, ent := range ents {
-		size += entryEncodingSize(proto.Size(ent))
+		size += entryEncodingSize(pb.EntrySize(ent))
 	}
 	return size
 }
@@ -287,9 +285,9 @@ func limitSize(ents []*pb.Entry, maxSize entryEncodingSize) []*pb.Entry {
 	if len(ents) == 0 {
 		return ents
 	}
-	size := entryEncodingSize(proto.Size(ents[0]))
+	size := entryEncodingSize(pb.EntrySize(ents[0]))
 	for limit := 1; limit < len(ents); limit++ {
-		size += entryEncodingSize(proto.Size(ents[limit]))
+		size += entryEncodingSize(pb.EntrySize(ents[limit]))
 		if size > maxSize {
 			return ents[:limit]
 		}
@@ -341,3 +339,33 @@ func extend(dst, vals []*pb.Entry) []*pb.Entry {
 	copy(buf[len(dst):], vals)
 	return buf
 }
+
+// A logger argument formatted only when the Logger prints it (fmt calls its String method),
+// so that raft calls no formatting function itself on the paths that only log: the Logger
+// implementation decides (one that discards its arguments formats nothing).
+
+// lazySprintf prints as fmt.Sprintf(format, args...).
+type lazySprintf struct {
+	format string
+	args   []any
+}
+
+func (l lazySprintf) String() string { return fmt.Sprintf(l.format, l.args...) }
+
+// hexIDs prints as its ids in hexadecimal, separated by commas.
+type hexIDs []uint64
+
+func (ids hexIDs) String() string {
+	var strs []string
+	for _, id := range ids {
+		strs = append(strs, fmt.Sprintf("%x", id))
+	}
+	return strings.Join(strs, ",")
+}
+
+// describedConfChange prints as DescribeConfChange(cc).
+type describedConfChange struct {
+	cc pb.ConfChangeI
+}
+
+func (d describedConfChange) String() string { return DescribeConfChange(d.cc) }
