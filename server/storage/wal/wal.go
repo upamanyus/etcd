@@ -1177,7 +1177,9 @@ func (w *WAL) SaveSnapshot(e *walpb.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	if curOff < SegmentSizeBytes {
+	// Create saves its snapshot record before the WAL has a file pipeline (w.fp):
+	// its first segment keeps the metadata whatever its size, as before.
+	if curOff < SegmentSizeBytes || w.fp == nil {
 		return w.sync()
 	}
 	return w.cut()

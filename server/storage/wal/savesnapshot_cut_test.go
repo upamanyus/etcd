@@ -72,3 +72,27 @@ func TestSaveSnapshotCuts(t *testing.T) {
 	require.Equal(t, state.GetTerm(), st.GetTerm())
 	require.Empty(t, ents)
 }
+
+// TestCreateLargeMetadata checks that Create still succeeds when its first
+// segment (the metadata and the empty snapshot) passes SegmentSizeBytes:
+// SaveSnapshot does not cut before the WAL has a file pipeline.
+func TestCreateLargeMetadata(t *testing.T) {
+	p := t.TempDir()
+
+	restoreLater := SegmentSizeBytes
+	SegmentSizeBytes = 2 * 1024
+	defer func() { SegmentSizeBytes = restoreLater }()
+
+	md := make([]byte, 1024*1024)
+	md[0] = 1
+	w, err := Create(zaptest.NewLogger(t), p, md)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	nw, err := Open(zaptest.NewLogger(t), p, &walpb.Snapshot{Index: new(uint64(0)), Term: new(uint64(0))})
+	require.NoError(t, err)
+	defer nw.Close()
+	gmd, _, _, err := nw.ReadAll()
+	require.NoError(t, err)
+	require.Equal(t, md, gmd)
+}
