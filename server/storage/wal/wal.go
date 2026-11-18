@@ -1169,7 +1169,18 @@ func (w *WAL) SaveSnapshot(e *walpb.Snapshot) error {
 	if w.enti < e.GetIndex() {
 		w.enti = e.GetIndex()
 	}
-	return w.sync()
+
+	// Cut as Save does: snapshot records saved between two Saves that write
+	// nothing (raft hands a commit backlog out over Readys with an empty hard
+	// state and no entries) would otherwise grow the tail without bound.
+	curOff, err := w.tail().Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if curOff < SegmentSizeBytes {
+		return w.sync()
+	}
+	return w.cut()
 }
 
 func (w *WAL) saveCrc(prevCrc uint32) error {
