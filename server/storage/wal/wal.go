@@ -1101,7 +1101,26 @@ func (w *WAL) saveState(s *raftpb.HardState) error {
 	return w.encoder.encode(rec)
 }
 
+// MaxSaveBatchBytes bounds the bytes one Save may write: an entry counts its encoding
+// (proto.Size) plus saveEntryOverhead (its record's frame and padding). A larger batch
+// is refused before anything is written, so the WAL stays usable; a batch written
+// whole into one segment could otherwise pass the file system's file-size limit
+// (ext4: 16 TiB, EFBIG) and leave a torn record in the tail.
+var MaxSaveBatchBytes int64 = 1 << 42 // 4 TiB
+
+const saveEntryOverhead = 64
+
+var ErrSaveBatchTooLarge = errors.New("wal: batch exceeds MaxSaveBatchBytes")
+
 func (w *WAL) Save(st *raftpb.HardState, ents []*raftpb.Entry) error {
+	var n int64
+	for _, e := range ents {
+		n += int64(proto.Size(e)) + saveEntryOverhead
+		if n > MaxSaveBatchBytes {
+			return ErrSaveBatchTooLarge
+		}
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
