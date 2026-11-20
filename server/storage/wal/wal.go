@@ -86,6 +86,14 @@ type WAL struct {
 	decoder   Decoder         // decoder to Decode records
 	readClose func() error    // closer for Decode reader
 
+	// If the filename lookup skipped segments, a missing snapshot can require a
+	// second read on WALs written before cuts accounted for snapshot records.
+	fallback *walReadRange
+
+	// A legacy segment name can be at or below a snapshot recorded before it.
+	// For those locks, keep the preceding segment until a later snapshot.
+	snapBefore map[*fileutil.LockedFile]uint64
+
 	unsafeNoSync bool // if set, do not fsync
 
 	mu      sync.Mutex
@@ -427,6 +435,10 @@ func openAtIndex(lg *zap.Logger, dirpath string, startSnap *walpb.Snapshot, writ
 		locks:     ls,
 	}
 
+	if nameIndex > 0 {
+		w.fallback = &walReadRange{names: names, first: nameIndex}
+	}
+
 	if write {
 		// write reuses the file descriptors from read; don't close so
 		// WAL can append without dropping the file lock
@@ -439,6 +451,11 @@ func openAtIndex(lg *zap.Logger, dirpath string, startSnap *walpb.Snapshot, writ
 	}
 
 	return w, nil
+}
+
+type walReadRange struct {
+	names []string
+	first int
 }
 
 func selectWALFiles(lg *zap.Logger, dirpath string, snap *walpb.Snapshot) ([]string, int, error) {
@@ -512,9 +529,15 @@ func openWALFiles(lg *zap.Logger, dirpath string, names []string, nameIndex int,
 // ReadAll may return uncommitted yet entries, that are subject to be overridden.
 // Do not apply entries that have index > state.commit, as they are subject to change.
 func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftpb.Entry, err error) {
-	state = &raftpb.HardState{}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.readAll()
+}
+
+func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftpb.Entry, err error) {
+	state = &raftpb.HardState{}
+	fallback := w.fallback
+	w.fallback = nil
 
 	rec := &walpb.Record{}
 
@@ -524,6 +547,7 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	decoder := w.decoder
 
 	var match bool
+	segment := 0
 	// The log the records write is the log at the start snapshot's index followed by ents. An
 	// entry written at or below the start index truncates the log there, so the entries above it
 	// go. At the start snapshot's own record, a snapshot above the commit index saved before it
@@ -544,6 +568,15 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 					// return error before append call causes runtime panic.
 					// We still return the continuous WAL entries that have already been read.
 					// Refer to https://github.com/etcd-io/etcd/pull/19038#issuecomment-2557414292.
+					if !match && fallback != nil {
+						reopened, err := w.reopenAtRecord(fallback)
+						if err != nil {
+							return nil, state, nil, err
+						}
+						if reopened {
+							return w.readAll()
+						}
+					}
 					return nil, state, ents, fmt.Errorf("%w, snapshot[Index: %d, Term: %d], current entry[Index: %d, Term: %d], len(ents): %d",
 						ErrSliceOutOfRange, w.start.GetIndex(), w.start.GetTerm(), e.GetIndex(), e.GetTerm(), len(ents))
 				}
@@ -563,6 +596,25 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 			metadata = rec.Data
 
 		case CrcType:
+			// Each segment begins with a CRC seed. Record only the names that
+			// would otherwise let ReleaseLockTo skip past a snapshot.
+			if segment < len(w.locks) {
+				lock := w.locks[segment]
+				if lock != nil && w.snapi != 0 {
+					_, index, err := parseWALName(filepath.Base(lock.Name()))
+					if err != nil {
+						return nil, state, nil, err
+					}
+					if index <= w.snapi {
+						if w.snapBefore == nil {
+							w.snapBefore = make(map[*fileutil.LockedFile]uint64)
+						}
+						w.snapBefore[lock] = w.snapi
+					}
+				}
+				segment++
+			}
+
 			crc := decoder.LastCRC()
 			// current crc of decoder must match the crc of the record.
 			// do no need to match 0 crc, since the decoder is a new one at this case.
@@ -598,6 +650,16 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 		default:
 			state.Reset()
 			return nil, state, nil, fmt.Errorf("unexpected block type %d", rec.GetType())
+		}
+	}
+
+	if !match && fallback != nil && (errors.Is(err, io.EOF) || (w.tail() == nil && errors.Is(err, io.ErrUnexpectedEOF))) {
+		reopened, rerr := w.reopenAtRecord(fallback)
+		if rerr != nil {
+			return nil, state, nil, rerr
+		}
+		if reopened {
+			return w.readAll()
 		}
 	}
 
@@ -648,9 +710,6 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 	}
 
 	err = nil
-	if !match {
-		err = ErrSnapshotNotFound
-	}
 
 	// The hard state the records hold: a cut repeats it at the head of the next file (saveState),
 	// so that a later ReadAll starting in that file knows the commit index saved before its records
@@ -677,11 +736,105 @@ func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 
 	// newFileEncoder's nil error must not hide that the start snapshot was not found: in write mode
 	// too, a WAL read without its start snapshot's record is not known to be consistent with it.
-	if err == nil && !match {
+	if !match {
 		err = ErrSnapshotNotFound
 	}
 
 	return metadata, state, ents, err
+}
+
+// reopenAtRecord looks back only after an unmatched read. The ordinary read
+// uses the filename index and decodes each record once. A legacy read starts
+// again at the segment containing the snapshot and validates the CRC chain
+// across the entire extended range before accepting its state or entries.
+func (w *WAL) reopenAtRecord(r *walReadRange) (bool, error) {
+	i, err := snapshotPrefix(w.lg, w.dir, r.names, r.first, w.start.GetIndex())
+	if err != nil || i < 0 {
+		return false, err
+	}
+	if w.tail() == nil {
+		rs, ls, closeFiles, err := openWALFiles(w.lg, w.dir, r.names, i, false)
+		if err != nil {
+			return false, err
+		}
+		w.readClose()
+		w.readClose = closeFiles
+		w.decoder = NewDecoder(rs...)
+		w.locks = ls
+	} else {
+		rs, ls, closePrefix, err := openWALFiles(w.lg, w.dir, r.names[:r.first], i, true)
+		if err != nil {
+			return false, err
+		}
+		for _, lock := range w.locks {
+			if _, err := lock.Seek(0, io.SeekStart); err != nil {
+				closePrefix()
+				return false, err
+			}
+			rs = append(rs, fileutil.NewFileReader(lock.File))
+		}
+		w.locks = append(ls, w.locks...)
+		w.decoder = NewDecoder(rs...)
+	}
+	w.enti = 0
+	w.snapi = 0
+	w.snapBefore = nil
+	return true, nil
+}
+
+// snapshotPrefix locates the start of a legacy replay before the filename-selected suffix.
+func snapshotPrefix(lg *zap.Logger, dir string, names []string, first int, index uint64) (int, error) {
+	for i := first - 1; i >= 0; i-- {
+		found, err := segmentContainsSnapshot(lg, dir, names[i], index)
+		if err != nil {
+			return -1, err
+		}
+		if !found {
+			continue
+		}
+		// The matching record can itself follow a cut above the requested
+		// index. Include the segment that may hold its preceding entries.
+		if j, ok := searchIndex(lg, names[:i+1], index); ok {
+			i = j
+		}
+		if !isValidSeq(lg, names[i:]) {
+			return -1, fmt.Errorf("wal: discontinuous segment sequence at %s", names[i])
+		}
+		return i, nil
+	}
+	return -1, nil
+}
+
+// segmentContainsSnapshot locates the record by index. readAll checks its term
+// and replays the records, including entries saved before the snapshot record.
+func segmentContainsSnapshot(lg *zap.Logger, dir, name string, index uint64) (bool, error) {
+	rs, _, closeFile, err := openWALFiles(lg, dir, []string{name}, 0, false)
+	if err != nil {
+		return false, err
+	}
+	defer closeFile()
+	d := NewDecoder(rs...)
+	rec := &walpb.Record{}
+	for {
+		if err := d.Decode(rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, err
+		}
+		switch rec.GetType() {
+		case CrcType:
+			d.UpdateCRC(rec.GetCrc())
+		case SnapshotType:
+			var snap walpb.Snapshot
+			if err := proto.Unmarshal(rec.Data, &snap); err != nil {
+				return false, err
+			}
+			if snap.GetIndex() == index {
+				return true, nil
+			}
+		}
+	}
 }
 
 func (w *WAL) LatestSnapshotEntry() (*walpb.Snapshot, error) {
@@ -801,13 +954,6 @@ func validSnapshotEntries(lg *zap.Logger, walDir string) ([]*walpb.Snapshot, err
 // If the loaded snap doesn't match with the expected one, it will
 // return error ErrSnapshotMismatch.
 func Verify(lg *zap.Logger, walDir string, snap *walpb.Snapshot) (*raftpb.HardState, error) {
-	var metadata []byte
-	var err error
-	var match bool
-	state := &raftpb.HardState{}
-
-	rec := &walpb.Record{}
-
 	if lg == nil {
 		lg = zap.NewNop()
 	}
@@ -815,6 +961,28 @@ func Verify(lg *zap.Logger, walDir string, snap *walpb.Snapshot) (*raftpb.HardSt
 	if err != nil {
 		return nil, err
 	}
+
+	state, err := verifyRange(lg, walDir, snap, names, nameIndex)
+	if !errors.Is(err, ErrSnapshotNotFound) || nameIndex == 0 {
+		return state, err
+	}
+	first, err := snapshotPrefix(lg, walDir, names, nameIndex, snap.GetIndex())
+	if err != nil {
+		return nil, err
+	}
+	if first < 0 {
+		return nil, ErrSnapshotNotFound
+	}
+	return verifyRange(lg, walDir, snap, names, first)
+}
+
+func verifyRange(lg *zap.Logger, walDir string, snap *walpb.Snapshot, names []string, nameIndex int) (*raftpb.HardState, error) {
+	var metadata []byte
+	var err error
+	var match bool
+	state := &raftpb.HardState{}
+
+	rec := &walpb.Record{}
 
 	// open wal files in read mode, so that there is no conflict
 	// when the same WAL is opened elsewhere in write mode
@@ -1025,7 +1193,7 @@ func (w *WAL) ReleaseLockTo(index uint64) error {
 		if err != nil {
 			return err
 		}
-		if lockIndex >= index {
+		if before, ok := w.snapBefore[l]; lockIndex >= index || (ok && before >= index) {
 			smaller = i - 1
 			found = true
 			break
@@ -1046,6 +1214,7 @@ func (w *WAL) ReleaseLockTo(index uint64) error {
 		if w.locks[i] == nil {
 			continue
 		}
+		delete(w.snapBefore, w.locks[i])
 		w.locks[i].Close()
 	}
 	w.locks = w.locks[smaller:]

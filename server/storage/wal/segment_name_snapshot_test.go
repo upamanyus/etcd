@@ -15,6 +15,7 @@
 package wal
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -33,6 +34,15 @@ import (
 // succeeds. Before, the segment was named 39 (the last entry, 38, plus one): Open at 41 started
 // there, after the record, and ReadAll failed with ErrSnapshotNotFound.
 func TestRestartAtSnapshotSavedBeforeReSentEntries(t *testing.T) {
+	testRestartAfterResentEntries(t, false)
+}
+
+func TestUpgradeOldNamedWAL(t *testing.T) {
+	testRestartAfterResentEntries(t, true)
+}
+
+func testRestartAfterResentEntries(t *testing.T, oldNames bool) {
+	t.Helper()
 	old := SegmentSizeBytes
 	SegmentSizeBytes = 64 * 1000 * 1000
 	defer func() { SegmentSizeBytes = old }()
@@ -62,23 +72,62 @@ func TestRestartAtSnapshotSavedBeforeReSentEntries(t *testing.T) {
 	require.Len(t, rents, 36)
 	SegmentSizeBytes = 1
 	require.NoError(t, w.Save(hs(36), ents(37, 38))) // cuts a segment
+	require.NoError(t, w.Save(hs(36), ents(39, 40))) // cuts a second segment
 	SegmentSizeBytes = 64 * 1000 * 1000
-	require.NoError(t, w.Save(hs(41), ents(39, 41)))
+	require.NoError(t, w.Save(hs(43), ents(41, 43)))
 	require.NoError(t, w.Close())
 	names, err := readWALNames(lg, dir)
 	require.NoError(t, err)
-	require.Equal(t, []string{walName(0, 0), walName(1, 42)}, names)
+	require.Equal(t, []string{walName(0, 0), walName(1, 42), walName(2, 42)}, names)
+	if oldNames {
+		// Older cut used the last entry plus one. Only the filenames differ.
+		require.NoError(t, os.Rename(filepath.Join(dir, names[1]), filepath.Join(dir, walName(1, 39))))
+		require.NoError(t, os.Rename(filepath.Join(dir, names[2]), filepath.Join(dir, walName(2, 41))))
+	}
 
 	snaps, err = ValidSnapshotEntries(lg, dir)
 	require.NoError(t, err)
 	require.Equal(t, uint64(41), snaps[len(snaps)-1].GetIndex())
-	w, err = Open(lg, dir, &walpb.Snapshot{Index: new(uint64(41)), Term: new(uint64(1))})
+	start := snaps[len(snaps)-1]
+	verified, err := Verify(lg, dir, start)
 	require.NoError(t, err)
-	defer w.Close()
-	require.Len(t, w.locks, 2) // Open starts at the segment holding the record of 41
+	require.Equal(t, uint64(43), verified.GetCommit())
+	reader, err := OpenForRead(lg, dir, start)
+	require.NoError(t, err)
+	md, roState, readEntries, err := reader.ReadAll()
+	require.NoError(t, err)
+	require.Equal(t, []byte("md"), md)
+	require.Equal(t, uint64(43), roState.GetCommit())
+	require.Len(t, readEntries, 2)
+	require.Equal(t, uint64(42), readEntries[0].GetIndex())
+	require.Equal(t, uint64(43), readEntries[1].GetIndex())
+	w, err = Open(lg, dir, start)
+	require.NoError(t, err)
 	_, st, rents, err := w.ReadAll()
 	require.NoError(t, err)
-	require.Equal(t, uint64(41), st.GetCommit())
-	require.Empty(t, rents)
+	require.Equal(t, uint64(43), st.GetCommit())
+	require.Len(t, rents, 2)
+	require.Equal(t, uint64(42), rents[0].GetIndex())
+	require.Equal(t, uint64(43), rents[1].GetIndex())
 	require.Equal(t, uint64(41), w.snapi)
+	require.NoError(t, w.ReleaseLockTo(41))
+	require.Equal(t, walName(0, 0), filepath.Base(w.locks[0].Name()), "retain the snapshot until a newer one is available")
+	newSnap := &walpb.Snapshot{Index: new(uint64(43)), Term: new(uint64(1)), ConfState: start.GetConfState()}
+	require.NoError(t, w.SaveSnapshot(newSnap))
+	require.NoError(t, w.ReleaseLockTo(43))
+	require.Len(t, w.locks, 1)
+	require.NoError(t, w.Close())
+	// A purge may now remove every unlocked segment.
+	names, err = readWALNames(lg, dir)
+	require.NoError(t, err)
+	for _, name := range names[:len(names)-1] {
+		require.NoError(t, os.Remove(filepath.Join(dir, name)))
+	}
+	w, err = Open(lg, dir, newSnap)
+	require.NoError(t, err)
+	defer w.Close()
+	_, st, rents, err = w.ReadAll()
+	require.NoError(t, err)
+	require.Equal(t, uint64(43), st.GetCommit())
+	require.Empty(t, rents)
 }
