@@ -84,6 +84,8 @@ type Backend interface {
 }
 
 type Snapshot interface {
+	// Read metadata from the same frozen transaction that WriteTo streams.
+	UnsafeReader
 	// Size gets the size of the snapshot.
 	Size() int64
 	// WriteTo writes the snapshot into the given writer.
@@ -1124,6 +1126,18 @@ type snapshot struct {
 	*bolt.Tx
 	stopc chan struct{}
 	donec chan struct{}
+}
+
+func (s *snapshot) UnsafeRange(bucket Bucket, key, endKey []byte, limit int64) ([][]byte, [][]byte) {
+	b := s.Tx.Bucket(bucket.Name())
+	if b == nil {
+		return nil, nil
+	}
+	return unsafeRange(b.Cursor(), key, endKey, limit)
+}
+
+func (s *snapshot) UnsafeForEach(bucket Bucket, visitor func(k, v []byte) error) error {
+	return unsafeForEach(s.Tx, bucket, visitor)
 }
 
 func (s *snapshot) Close() error {
