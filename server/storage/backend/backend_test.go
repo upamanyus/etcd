@@ -69,6 +69,14 @@ func TestBackendSnapshot(t *testing.T) {
 	}
 	snap := b.Snapshot()
 	defer func() { assert.NoError(t, snap.Close()) }()
+	// Publish a later value while the snapshot remains open. Metadata reads and
+	// the database stream must both use the earlier transaction.
+	tx.Lock()
+	tx.UnsafePut(schema.Test, []byte("foo"), []byte("new"))
+	tx.Unlock()
+	b.ForceCommit()
+	_, vs := snap.UnsafeRange(schema.Test, []byte("foo"), nil, 0)
+	require.Equal(t, [][]byte{[]byte("bar")}, vs)
 	if _, err := snap.WriteTo(f); err != nil {
 		t.Fatal(err)
 	}
