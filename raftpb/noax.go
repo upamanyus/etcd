@@ -19,11 +19,7 @@ package raftpb
 // integer arithmetic only (no reflect, no unsafe), so that they can be verified as ordinary
 // Go code. Each is checked against protobuf-go by the differential tests of noax_test.go.
 
-import (
-	"errors"
-
-	"google.golang.org/protobuf/encoding/protowire"
-)
+import "errors"
 
 // cloneUint64 returns a fresh pointer to *p, or nil if p is nil.
 func cloneUint64(p *uint64) *uint64 {
@@ -321,18 +317,78 @@ func consumeBytes(b []byte, i int) ([]byte, int, bool) {
 func consumeTag(data []byte, i int) (uint64, int, bool) {
 	tag, next, ok := consumeVarint(data, i)
 	field := tag >> 3
-	return tag, next, ok && field >= 1 && field <= uint64(protowire.MaxValidNumber)
+	return tag, next, ok && field >= 1 && field <= (1<<29)-1
+}
+
+// skipScalar returns the index after a protobuf field value.
+func skipScalar(data []byte, i int, typ uint64) (int, bool) {
+	switch typ {
+	case 0: // varint
+		_, next, ok := consumeVarint(data, i)
+		return next, ok
+	case 1: // fixed64
+		if len(data)-i >= 8 {
+			return i + 8, true
+		}
+	case 2: // bytes
+		_, next, ok := consumeField(data, i)
+		return next, ok
+	case 5: // fixed32
+		if len(data)-i >= 4 {
+			return i + 4, true
+		}
+	}
+	return 0, false
+}
+
+// skipField also handles groups. As in protowire.ConsumeFieldValue, each end
+// tag matches its opening field number. The outer group starts at the default
+// recursion limit (10000), and a group at depth zero is still accepted.
+func skipField(data []byte, i int, tag uint64) (int, bool) {
+	if tag&7 != 3 {
+		return skipScalar(data, i, tag&7)
+	}
+	open := []uint64{tag >> 3}
+	for len(open) != 0 {
+		nextTag, start, ok := consumeVarint(data, i)
+		num := nextTag >> 3
+		// Inside groups protowire.ConsumeTag accepts MessageSet's extended
+		// field numbers, up to MaxInt32.
+		if !ok || num == 0 || num > (1<<31)-1 {
+			return 0, false
+		}
+		switch nextTag & 7 {
+		case 3:
+			if len(open) > 10000 {
+				return 0, false
+			}
+			open = append(open, num)
+			i = start
+		case 4:
+			if open[len(open)-1] != num {
+				return 0, false
+			}
+			open = open[:len(open)-1]
+			i = start
+		default:
+			i, ok = skipScalar(data, start, nextTag&7)
+			if !ok {
+				return 0, false
+			}
+		}
+	}
+	return i, true
 }
 
 // Unknown fields retain their original value bytes. Protobuf-go rewrites the tag
 // in its shortest encoding, including when a known field has another wire type.
 func consumeUnknown(data []byte, i int, tag uint64, fields []byte) ([]byte, int, bool) {
-	n := protowire.ConsumeFieldValue(protowire.Number(tag>>3), protowire.Type(tag&7), data[i:])
-	if n < 0 {
+	end, ok := skipField(data, i, tag)
+	if !ok {
 		return fields, i, false
 	}
 	fields = appendVarint(fields, tag)
-	return append(fields, data[i:i+n]...), i + n, true
+	return append(fields, data[i:end]...), end, true
 }
 
 // UnmarshalConfChangeV1 resets c and decodes the protobuf message in wire order.

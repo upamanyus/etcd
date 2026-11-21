@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -545,6 +546,18 @@ func TestUnmarshalWireCompatibility(t *testing.T) {
 	}
 	if _, ok2 := checkDecode(t, b); !ok2 {
 		t.Fatalf("UnmarshalConfChangeV2 rejects %x", b)
+	}
+}
+
+// The message decoder and protowire have different field-number limits
+// inside groups. Compare the complete retained bytes with protobuf-go.
+func TestUnknownConfChangeGroup(t *testing.T) {
+	for _, inner := range []protowire.Number{21, 1 << 29, 1<<31 - 1} {
+		wire := protowire.AppendTag(nil, 20, protowire.StartGroupType)
+		wire = protowire.AppendTag(wire, inner, protowire.Fixed64Type)
+		wire = protowire.AppendFixed64(wire, 123)
+		wire = protowire.AppendTag(wire, 20, protowire.EndGroupType)
+		checkDecode(t, wire)
 	}
 }
 
