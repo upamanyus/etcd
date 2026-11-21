@@ -23,18 +23,36 @@ import (
 
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.etcd.io/raft/v3/raftpb"
 )
 
 // createMergedSnapshotMessage creates a snapshot message that contains: raft status (term, conf),
 // a snapshot of v2 store inside raft.Snapshot as []byte, a snapshot of v3 KV in the top level message
 // as ReadCloser.
-func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi uint64, confState *raftpb.ConfState) *snap.Message {
+func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi uint64, confState *raftpb.ConfState, terms replayTerms) *snap.Message {
 	lg := s.Logger()
 
 	// commit kv to write metadata(for example: consistent index).
 	s.KV().Commit()
 	dbsnap := s.be.Snapshot()
+	if ci, term := schema.UnsafeReadConsistentIndex(dbsnap); ci > snapi {
+		snapi = ci
+		snapt = term
+		if snapt == 0 {
+			snapt = terms.termAt(ci)
+		}
+		confState = schema.UnsafeConfStateFromBackend(lg, dbsnap)
+		if confState == nil {
+			// Pre-3.5 backends store membership without a ConfState.
+			members, err := schema.UnsafeReadMembers(lg, dbsnap)
+			if err != nil {
+				lg.Panic("couldn't read members from snapshot", zap.Error(err))
+			}
+			cs := confStateFromMembers(members)
+			confState = &cs
+		}
+	}
 	// get a snapshot of v3 KV as readCloser
 	rc := newSnapshotReaderCloser(lg, dbsnap)
 

@@ -1011,15 +1011,8 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 		// its applied index, or which was installed in an earlier term and applied before any
 		// batch of raftTerm.
 		if m.GetTerm() == apply.raftTerm && m.GetSnapshot().GetMetadata().GetIndex() <= ep.appliedi {
-			if ep.appliedi < s.consistIndex.ConsistentIndex() {
-				// Inside the replay window after a restart the backend is ahead of the applied
-				// index: a merged snapshot would carry a database newer than its index, which a
-				// follower could later replace by an older one. Defer it until the window is over.
-				s.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
-			} else {
-				merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState)
-				s.sendMergedSnap(merged)
-			}
+			merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState, apply.replayTerms)
+			s.sendMergedSnap(merged)
 		} else {
 			// A dropped snapshot must be reported failed: raft keeps the follower's progress in
 			// StateSnapshot, sending it nothing, until it hears how the snapshot went.
