@@ -192,9 +192,8 @@ type bootstrappedCluster struct {
 }
 
 type bootstrappedRaft struct {
-	replayTerms replayTerms
-	lg          *zap.Logger
-	heartbeat   time.Duration
+	lg        *zap.Logger
+	heartbeat time.Duration
 
 	peers   []raft.Peer
 	config  *raft.Config
@@ -575,11 +574,10 @@ func bootstrapRaftFromCluster(cfg config.ServerConfig, cl *membership.RaftCluste
 func bootstrapRaftFromWAL(cfg config.ServerConfig, bwal *bootstrappedWAL) *bootstrappedRaft {
 	s := bwal.MemoryStorage()
 	return &bootstrappedRaft{
-		lg:          cfg.Logger,
-		replayTerms: replayTerms(nil).appendEntries(bwal.ents),
-		heartbeat:   time.Duration(cfg.TickMs) * time.Millisecond,
-		config:      raftConfig(cfg, uint64(bwal.meta.nodeID), s),
-		storage:     s,
+		lg:        cfg.Logger,
+		heartbeat: time.Duration(cfg.TickMs) * time.Millisecond,
+		config:    raftConfig(cfg, uint64(bwal.meta.nodeID), s),
+		storage:   s,
 	}
 }
 
@@ -599,7 +597,9 @@ func raftConfig(cfg config.ServerConfig, id uint64, s *raft.MemoryStorage) *raft
 
 func (b *bootstrappedRaft) newRaftNode(ss *snap.Snapshotter, wal *wal.WAL, cl *membership.RaftCluster) *raftNode {
 	var n raft.Node
+	var terms replayTerms
 	if len(b.peers) == 0 {
+		terms = replayTermsFromStorage(b.storage)
 		n = raft.RestartNode(b.config)
 	} else {
 		n = raft.StartNode(b.config, b.peers)
@@ -614,7 +614,7 @@ func (b *bootstrappedRaft) newRaftNode(ss *snap.Snapshotter, wal *wal.WAL, cl *m
 			Node:               n,
 			heartbeat:          b.heartbeat,
 			raftStorage:        b.storage,
-			initialReplayTerms: b.replayTerms,
+			initialReplayTerms: terms,
 			storage:            serverstorage.NewStorage(b.lg, wal, ss),
 		},
 	)

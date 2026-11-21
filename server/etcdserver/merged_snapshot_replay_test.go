@@ -25,6 +25,7 @@ import (
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/schema"
+	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 )
 
@@ -142,7 +143,7 @@ func testReplaySnapshot(t *testing.T, legacy, bootstrap bool) {
 		bwal.ents = append(bwal.ents, &raftpb.Entry{Index: new(i), Term: new(uint64(2))})
 	}
 	boot := bootstrapRaftFromWAL(config.ServerConfig{Logger: lg}, bwal)
-	s.applyAll(&ep, &toApply{notifyc: done, raftAdvancedC: done, raftTerm: 3, replayTerms: boot.replayTerms})
+	s.applyAll(&ep, &toApply{notifyc: done, raftAdvancedC: done, raftTerm: 3, replayTerms: replayTermsFromStorage(boot.storage)})
 	require.True(t, sent, "applyAll did not deliver the current-term snapshot")
 }
 
@@ -163,4 +164,18 @@ func TestReplayTermsKeepEarlierBatch(t *testing.T) {
 	require.Equal(t, uint64(3), replaced.termAt(7))
 	require.Equal(t, uint64(4), extended.termAt(10))
 	require.Len(t, extended, 2)
+}
+
+func TestReplayTermsFromStorage(t *testing.T) {
+	store := raft.NewMemoryStorage()
+	require.Empty(t, replayTermsFromStorage(store))
+	snapshot := &raftpb.Snapshot{Metadata: &raftpb.SnapshotMetadata{Index: new(uint64(3)), Term: new(uint64(1))}}
+	require.NoError(t, store.ApplySnapshot(snapshot))
+	require.Empty(t, replayTermsFromStorage(store))
+	var entries []*raftpb.Entry
+	for i, term := range []uint64{1, 2, 2, 3} {
+		entries = append(entries, &raftpb.Entry{Index: new(uint64(4 + i)), Term: new(term)})
+	}
+	require.NoError(t, store.Append(entries))
+	require.Equal(t, replayTerms{{4, 4, 1}, {5, 6, 2}, {7, 7, 3}}, replayTermsFromStorage(store))
 }

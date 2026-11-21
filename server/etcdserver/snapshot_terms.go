@@ -3,7 +3,12 @@
 
 package etcdserver
 
-import "go.etcd.io/raft/v3/raftpb"
+import (
+	"math"
+
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
+)
 
 // A pre-3.5 backend can contain a consistent index without its term. Keep the
 // terms above the apply cursor as they were at each Ready. Reading live Raft
@@ -13,6 +18,19 @@ type replayTermRun struct {
 }
 
 type replayTerms []replayTermRun
+
+// Read the same recovered log that RestartNode will use. Bootstrap still
+// owns storage exclusively: its first and last indices are stable and Entries
+// over that range succeeds. An empty storage has first == last+1.
+func replayTermsFromStorage(storage *raft.MemoryStorage) replayTerms {
+	first, _ := storage.FirstIndex()
+	last, _ := storage.LastIndex()
+	if first > last {
+		return nil
+	}
+	entries, _ := storage.Entries(first, last+1, math.MaxUint64)
+	return replayTerms(nil).appendEntries(entries)
+}
 
 // after discards entries that this batch has already handed to the applier.
 func (r replayTerms) after(index uint64) replayTerms {
