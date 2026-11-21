@@ -1003,14 +1003,8 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 	select {
 	// snapshot requested via send()
 	case m := <-s.r.msgSnapC:
-		// drop it unless raft is still at its term: the applied content must not be newer than m's term.
-		// Also drop it unless its snapshot is at or below the applied index, so that the merged
-		// snapshot is at least raft's. This second guard is for the proof (raft's
-		// isMessage_snap_recontent needs m.index <= ai) and should never fire together with the
-		// term check: raft's MsgSnap carries the storage snapshot, which apply created at or below
-		// its applied index, or which was installed in an earlier term and applied before any
-		// batch of raftTerm.
-		if m.GetTerm() == apply.raftTerm && m.GetSnapshot().GetMetadata().GetIndex() <= ep.appliedi {
+		// The applied content must belong to the term in which Raft sent the snapshot.
+		if m.GetTerm() == apply.raftTerm {
 			if ep.appliedi < s.consistIndex.ConsistentIndex() {
 				// Inside the replay window after a restart the backend is ahead of the applied
 				// index: a merged snapshot would carry a database newer than its index, which a
