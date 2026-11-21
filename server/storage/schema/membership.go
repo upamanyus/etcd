@@ -88,15 +88,11 @@ func (s *membershipBackend) MustReadMembersFromBackend() (map[types.ID]*membersh
 	return members, removed
 }
 
-func (s *membershipBackend) readMembersFromBackend() (map[types.ID]*membership.Member, map[types.ID]bool, error) {
+// UnsafeReadMembers reads the membership at the caller's transaction.
+func UnsafeReadMembers(lg *zap.Logger, tx backend.UnsafeReader) (map[types.ID]*membership.Member, error) {
 	members := make(map[types.ID]*membership.Member)
-	removed := make(map[types.ID]bool)
-
-	tx := s.be.ReadTx()
-	tx.RLock()
-	defer tx.RUnlock()
 	err := tx.UnsafeForEach(Members, func(k, v []byte) error {
-		memberID := mustParseMemberIDFromBytes(s.lg, k)
+		memberID := mustParseMemberIDFromBytes(lg, k)
 		m := &membership.Member{ID: memberID}
 		if err := json.Unmarshal(v, &m); err != nil {
 			return err
@@ -105,7 +101,21 @@ func (s *membershipBackend) readMembersFromBackend() (map[types.ID]*membership.M
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't read members from backend: %w", err)
+		return nil, fmt.Errorf("couldn't read members from backend: %w", err)
+	}
+
+	return members, nil
+}
+
+func (s *membershipBackend) readMembersFromBackend() (map[types.ID]*membership.Member, map[types.ID]bool, error) {
+	removed := make(map[types.ID]bool)
+
+	tx := s.be.ReadTx()
+	tx.RLock()
+	defer tx.RUnlock()
+	members, err := UnsafeReadMembers(s.lg, tx)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	err = tx.UnsafeForEach(MembersRemoved, func(k, v []byte) error {

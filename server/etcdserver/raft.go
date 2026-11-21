@@ -78,7 +78,8 @@ type toApply struct {
 	raftAdvancedC <-chan struct{}
 	// raftTerm is the term of the latest HardState raft has handed out, up
 	// to this batch: applyAll merges a queued MsgSnap only at this term
-	raftTerm uint64
+	raftTerm    uint64
+	replayTerms replayTerms
 }
 
 type raftNode struct {
@@ -108,7 +109,8 @@ type raftNode struct {
 }
 
 type raftNodeConfig struct {
-	lg *zap.Logger
+	initialReplayTerms replayTerms
+	lg                 *zap.Logger
 
 	// to check if msg receiver is removed from cluster
 	isIDRemoved func(id uint64) bool
@@ -181,6 +183,8 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 		defer r.onStop()
 		islead := false
 		raftTerm := uint64(0)
+		terms := r.initialReplayTerms
+		r.initialReplayTerms = nil
 
 		for {
 			select {
@@ -226,7 +230,15 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 				notifyc := make(chan struct{}, 1)
 				raftAdvancedC := make(chan struct{}, 1)
 				raftSnap := proto.Clone(rd.Snapshot).(*raftpb.Snapshot)
+				if !raft.IsEmptySnap(raftSnap) {
+					terms = nil
+				}
+				terms = terms.appendEntries(rd.Entries)
+				if len(committedEntries) > 0 {
+					terms = terms.after(committedEntries[len(committedEntries)-1].GetIndex())
+				}
 				ap := toApply{
+					replayTerms:   terms,
 					entries:       committedEntries,
 					snapshot:      proto.Clone(rd.Snapshot).(*raftpb.Snapshot),
 					notifyc:       notifyc,

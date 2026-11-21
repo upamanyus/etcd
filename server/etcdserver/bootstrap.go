@@ -131,6 +131,10 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 
 func buildConfStateFromV3store(lg *zap.Logger, be backend.Backend) raftpb.ConfState {
 	members, _ := schema.NewMembershipBackend(lg, be).MustReadMembersFromBackend()
+	return confStateFromMembers(members)
+}
+
+func confStateFromMembers(members map[types.ID]*membership.Member) raftpb.ConfState {
 	var (
 		voters   []uint64
 		learners []uint64
@@ -188,8 +192,9 @@ type bootstrappedCluster struct {
 }
 
 type bootstrappedRaft struct {
-	lg        *zap.Logger
-	heartbeat time.Duration
+	replayTerms replayTerms
+	lg          *zap.Logger
+	heartbeat   time.Duration
 
 	peers   []raft.Peer
 	config  *raft.Config
@@ -570,10 +575,11 @@ func bootstrapRaftFromCluster(cfg config.ServerConfig, cl *membership.RaftCluste
 func bootstrapRaftFromWAL(cfg config.ServerConfig, bwal *bootstrappedWAL) *bootstrappedRaft {
 	s := bwal.MemoryStorage()
 	return &bootstrappedRaft{
-		lg:        cfg.Logger,
-		heartbeat: time.Duration(cfg.TickMs) * time.Millisecond,
-		config:    raftConfig(cfg, uint64(bwal.meta.nodeID), s),
-		storage:   s,
+		lg:          cfg.Logger,
+		replayTerms: replayTerms(nil).appendEntries(bwal.ents),
+		heartbeat:   time.Duration(cfg.TickMs) * time.Millisecond,
+		config:      raftConfig(cfg, uint64(bwal.meta.nodeID), s),
+		storage:     s,
 	}
 }
 
@@ -603,12 +609,13 @@ func (b *bootstrappedRaft) newRaftNode(ss *snap.Snapshotter, wal *wal.WAL, cl *m
 	raftStatusMu.Unlock()
 	return newRaftNode(
 		raftNodeConfig{
-			lg:          b.lg,
-			isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
-			Node:        n,
-			heartbeat:   b.heartbeat,
-			raftStorage: b.storage,
-			storage:     serverstorage.NewStorage(b.lg, wal, ss),
+			lg:                 b.lg,
+			isIDRemoved:        func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
+			Node:               n,
+			heartbeat:          b.heartbeat,
+			raftStorage:        b.storage,
+			initialReplayTerms: b.replayTerms,
+			storage:            serverstorage.NewStorage(b.lg, wal, ss),
 		},
 	)
 }
