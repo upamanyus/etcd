@@ -19,7 +19,11 @@ package raftpb
 // integer arithmetic only (no reflect, no unsafe), so that they can be verified as ordinary
 // Go code. Each is checked against protobuf-go by the differential tests of noax_test.go.
 
-import "errors"
+import (
+	"errors"
+
+	"google.golang.org/protobuf/encoding/protowire"
+)
 
 // cloneUint64 returns a fresh pointer to *p, or nil if p is nil.
 func cloneUint64(p *uint64) *uint64 {
@@ -188,12 +192,8 @@ func appendBytes(b []byte, v []byte) []byte {
 	return append(b, v...)
 }
 
-// MarshalConfChangeV1 returns the protobuf encoding of c's known fields, the bytes that
-// protobuf-go's proto.Marshal(c) returns when c has no unknown fields: each set field, in
-// field-number order (id, type, node_id, context), its tag then its value. Unknown fields are
-// not encoded (raft never makes a conf change with unknown fields; a deliberate
-// simplification). Nil if c is nil, a non-nil empty slice if no field is set, as
-// proto.Marshal.
+// MarshalConfChangeV1 encodes the set fields in field-number order, followed
+// by the unknown fields, as protobuf-go does. A nil message encodes to nil.
 func MarshalConfChangeV1(c *ConfChange) []byte {
 	if c == nil {
 		return nil
@@ -215,10 +215,10 @@ func MarshalConfChangeV1(c *ConfChange) []byte {
 		b = append(b, tagConfChangeContext)
 		b = appendBytes(b, c.Context)
 	}
-	return b
+	return append(b, c.unknownFields...)
 }
 
-// marshalConfChangeSingle returns the encoding of s's known fields (type, node_id); an empty
+// marshalConfChangeSingle returns the encoding of s, including its unknown fields; an empty
 // slice if s is nil, as protobuf encodes a nil element of a repeated message field.
 func marshalConfChangeSingle(s *ConfChangeSingle) []byte {
 	b := []byte{}
@@ -233,14 +233,11 @@ func marshalConfChangeSingle(s *ConfChangeSingle) []byte {
 		b = append(b, tagConfChangeSingleNodeID)
 		b = appendVarint(b, *s.NodeId)
 	}
-	return b
+	return append(b, s.unknownFields...)
 }
 
-// MarshalConfChangeV2 returns the protobuf encoding of c's known fields, the bytes that
-// protobuf-go's proto.Marshal(c) returns when c and its changes have no unknown fields: the
-// transition if set, each change as a length-delimited field, the context if set. Unknown
-// fields are not encoded (as MarshalConfChangeV1). Nil if c is nil, a non-nil empty slice if
-// no field is set, as proto.Marshal.
+// MarshalConfChangeV2 encodes the transition, nested changes, context and
+// unknown fields, preserving unknown fields inside each change as well.
 func MarshalConfChangeV2(c *ConfChangeV2) []byte {
 	if c == nil {
 		return nil
@@ -258,15 +255,14 @@ func MarshalConfChangeV2(c *ConfChangeV2) []byte {
 		b = append(b, tagConfChangeV2Context)
 		b = appendBytes(b, c.Context)
 	}
-	return b
+	return append(b, c.unknownFields...)
 }
 
 // errDecodeConfChange is the error of the conf change decoders on bytes they do not accept.
 var errDecodeConfChange = errors.New("raftpb: invalid conf change encoding")
 
-// consumeVarint decodes the varint at b[i:]: its value and the index after it. It accepts
-// only what appendVarint produces: at most 10 bytes, the last one at most 1 if there are 10
-// (the value fits 64 bits), and no trailing zero byte (the shortest encoding).
+// consumeVarint reads a protobuf uint64, including non-minimal encodings.
+// The tenth byte may carry only bit 63.
 func consumeVarint(b []byte, i int) (uint64, int, bool) {
 	var v uint64
 	var shift uint64
@@ -281,9 +277,6 @@ func consumeVarint(b []byte, i int) (uint64, int, bool) {
 		}
 		v |= uint64(c&0x7f) << shift
 		if c < 0x80 {
-			if n > 0 && c == 0 {
-				return 0, 0, false
-			}
 			return v, i, true
 		}
 		shift += 7
@@ -291,14 +284,10 @@ func consumeVarint(b []byte, i int) (uint64, int, bool) {
 	return 0, 0, false
 }
 
-// consumeEnum decodes the varint at b[i:] as an enum value: it accepts only the encoding of
-// an int32 (appendEnum's), a value below 2^31 or the sign extension of a negative int32.
+// consumeEnum takes the low 32 bits of a protobuf varint, as protobuf-go does.
 func consumeEnum(b []byte, i int) (int32, int, bool) {
 	v, j, ok := consumeVarint(b, i)
 	if !ok {
-		return 0, 0, false
-	}
-	if v >= 1<<31 && v < 0xffffffff80000000 {
 		return 0, 0, false
 	}
 	return int32(v), j, true
@@ -328,122 +317,146 @@ func consumeBytes(b []byte, i int) ([]byte, int, bool) {
 	return append([]byte{}, v...), j, true
 }
 
-// UnmarshalConfChangeV1 resets c and decodes data into it. It accepts exactly the outputs of
-// MarshalConfChangeV1 (each field at most once, in field-number order, shortest varints, an
-// enum an int32's encoding) and decodes them back to the same fields (an unset field unset,
-// the context a fresh slice, non-nil if set); it returns an error on any other bytes, leaving
-// c with some of the fields. On the bytes it accepts, it agrees with proto.Unmarshal; it is
-// stricter (protobuf-go also accepts other field orders, repeated fields, unknown fields).
-// The empty input gives the empty message.
+// consumeTag checks the field-number bounds used by protobuf-go's message decoder.
+func consumeTag(data []byte, i int) (uint64, int, bool) {
+	tag, next, ok := consumeVarint(data, i)
+	field := tag >> 3
+	return tag, next, ok && field >= 1 && field <= uint64(protowire.MaxValidNumber)
+}
+
+// Unknown fields retain their original value bytes. Protobuf-go rewrites the tag
+// in its shortest encoding, including when a known field has another wire type.
+func consumeUnknown(data []byte, i int, tag uint64, fields []byte) ([]byte, int, bool) {
+	n := protowire.ConsumeFieldValue(protowire.Number(tag>>3), protowire.Type(tag&7), data[i:])
+	if n < 0 {
+		return fields, i, false
+	}
+	fields = appendVarint(fields, tag)
+	return append(fields, data[i:i+n]...), i + n, true
+}
+
+// UnmarshalConfChangeV1 resets c and decodes the protobuf message in wire order.
 func UnmarshalConfChangeV1(data []byte, c *ConfChange) error {
 	*c = ConfChange{}
-	i := 0
-	if i < len(data) && data[i] == tagConfChangeID {
-		v, j, ok := consumeVarint(data, i+1)
+	for i := 0; i < len(data); {
+		tag, start, ok := consumeTag(data, i)
 		if !ok {
 			return errDecodeConfChange
 		}
-		c.Id = new(v)
-		i = j
-	}
-	if i < len(data) && data[i] == tagConfChangeType {
-		v, j, ok := consumeEnum(data, i+1)
-		if !ok {
-			return errDecodeConfChange
+		switch tag {
+		case tagConfChangeID:
+			v, next, ok := consumeVarint(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.Id = new(v)
+			i = next
+		case tagConfChangeType:
+			v, next, ok := consumeEnum(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.Type = new(ConfChangeType(v))
+			i = next
+		case tagConfChangeNodeID:
+			v, next, ok := consumeVarint(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.NodeId = new(v)
+			i = next
+		case tagConfChangeContext:
+			v, next, ok := consumeBytes(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.Context = v
+			i = next
+		default:
+			var ok bool
+			c.unknownFields, i, ok = consumeUnknown(data, start, tag, c.unknownFields)
+			if !ok {
+				return errDecodeConfChange
+			}
 		}
-		c.Type = new(ConfChangeType(v))
-		i = j
-	}
-	if i < len(data) && data[i] == tagConfChangeNodeID {
-		v, j, ok := consumeVarint(data, i+1)
-		if !ok {
-			return errDecodeConfChange
-		}
-		c.NodeId = new(v)
-		i = j
-	}
-	if i < len(data) && data[i] == tagConfChangeContext {
-		v, j, ok := consumeBytes(data, i+1)
-		if !ok {
-			return errDecodeConfChange
-		}
-		c.Context = v
-		i = j
-	}
-	if i != len(data) {
-		return errDecodeConfChange
 	}
 	return nil
 }
 
-// unmarshalConfChangeSingle decodes data, exactly an output of marshalConfChangeSingle, into a
-// new ConfChangeSingle; nil and false on any other bytes.
 func unmarshalConfChangeSingle(data []byte) (*ConfChangeSingle, bool) {
 	s := &ConfChangeSingle{}
-	i := 0
-	if i < len(data) && data[i] == tagConfChangeSingleType {
-		v, j, ok := consumeEnum(data, i+1)
+	for i := 0; i < len(data); {
+		tag, start, ok := consumeTag(data, i)
 		if !ok {
 			return nil, false
 		}
-		s.Type = new(ConfChangeType(v))
-		i = j
-	}
-	if i < len(data) && data[i] == tagConfChangeSingleNodeID {
-		v, j, ok := consumeVarint(data, i+1)
-		if !ok {
-			return nil, false
+		switch tag {
+		case tagConfChangeSingleType:
+			v, next, ok := consumeEnum(data, start)
+			if !ok {
+				return nil, false
+			}
+			s.Type = new(ConfChangeType(v))
+			i = next
+		case tagConfChangeSingleNodeID:
+			v, next, ok := consumeVarint(data, start)
+			if !ok {
+				return nil, false
+			}
+			s.NodeId = new(v)
+			i = next
+		default:
+			var ok bool
+			s.unknownFields, i, ok = consumeUnknown(data, start, tag, s.unknownFields)
+			if !ok {
+				return nil, false
+			}
 		}
-		s.NodeId = new(v)
-		i = j
-	}
-	if i != len(data) {
-		return nil, false
 	}
 	return s, true
 }
 
-// UnmarshalConfChangeV2 resets c and decodes data into it. It accepts exactly the outputs of
-// MarshalConfChangeV2 (the transition at most once, then any number of changes, then the
-// context at most once; each change's fields at most once, in field-number order; shortest
-// varints; an enum an int32's encoding) and decodes them back to the same fields (an unset
-// field unset, the context a fresh slice, non-nil if set, Changes nil if there are none); it
-// returns an error on any other bytes, leaving c with some of the fields. On the bytes it
-// accepts, it agrees with proto.Unmarshal; it is stricter (as UnmarshalConfChangeV1). The
-// empty input gives the empty message.
+// UnmarshalConfChangeV2 resets c and decodes the protobuf message in wire order.
 func UnmarshalConfChangeV2(data []byte, c *ConfChangeV2) error {
 	*c = ConfChangeV2{}
-	i := 0
-	if i < len(data) && data[i] == tagConfChangeV2Transition {
-		v, j, ok := consumeEnum(data, i+1)
+	for i := 0; i < len(data); {
+		tag, start, ok := consumeTag(data, i)
 		if !ok {
 			return errDecodeConfChange
 		}
-		c.Transition = new(ConfChangeTransition(v))
-		i = j
-	}
-	for i < len(data) && data[i] == tagConfChangeV2Changes {
-		v, j, ok := consumeField(data, i+1)
-		if !ok {
-			return errDecodeConfChange
+		switch tag {
+		case tagConfChangeV2Transition:
+			v, next, ok := consumeEnum(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.Transition = new(ConfChangeTransition(v))
+			i = next
+		case tagConfChangeV2Changes:
+			v, next, ok := consumeField(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			s, valid := unmarshalConfChangeSingle(v)
+			if !valid {
+				return errDecodeConfChange
+			}
+			c.Changes = append(c.Changes, s)
+			i = next
+		case tagConfChangeV2Context:
+			v, next, ok := consumeBytes(data, start)
+			if !ok {
+				return errDecodeConfChange
+			}
+			c.Context = v
+			i = next
+		default:
+			var ok bool
+			c.unknownFields, i, ok = consumeUnknown(data, start, tag, c.unknownFields)
+			if !ok {
+				return errDecodeConfChange
+			}
 		}
-		s, ok := unmarshalConfChangeSingle(v)
-		if !ok {
-			return errDecodeConfChange
-		}
-		c.Changes = append(c.Changes, s)
-		i = j
-	}
-	if i < len(data) && data[i] == tagConfChangeV2Context {
-		v, j, ok := consumeBytes(data, i+1)
-		if !ok {
-			return errDecodeConfChange
-		}
-		c.Context = v
-		i = j
-	}
-	if i != len(data) {
-		return errDecodeConfChange
 	}
 	return nil
 }

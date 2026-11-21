@@ -453,42 +453,34 @@ func TestUnmarshalRoundTrip(t *testing.T) {
 	}
 }
 
-// checkDecode checks the decoders on b: never a panic; if a decoder accepts b, proto.Unmarshal
-// does too with the same message, and re-encoding gives b back.
+// checkDecode compares acceptance, decoded fields and the subsequent serialization.
 func checkDecode(t *testing.T, b []byte) (bool, bool) {
 	t.Helper()
-	var d ConfChange
-	ok1 := UnmarshalConfChangeV1(b, &d) == nil
-	if ok1 {
-		var p ConfChange
-		if err := proto.Unmarshal(b, &p); err != nil {
-			t.Fatalf("UnmarshalConfChangeV1 accepts %x, proto.Unmarshal: %v", b, err)
+	check := func(want, got proto.Message, err error, marshal func() []byte) bool {
+		t.Helper()
+		refErr := proto.Unmarshal(b, want)
+		if (err == nil) != (refErr == nil) {
+			t.Fatalf("%T decoding %x: got %v, protobuf-go %v", got, b, err, refErr)
 		}
-		if !same(t, "fuzz ConfChange", &d, &p) {
-			t.Fatalf("UnmarshalConfChangeV1(%x) = %v, proto.Unmarshal = %v", b, &d, &p)
+		if err != nil {
+			return false
 		}
-		if e := MarshalConfChangeV1(&d); !bytes.Equal(e, b) {
-			t.Fatalf("UnmarshalConfChangeV1 accepts %x, which re-encodes to %x", b, e)
+		if !same(t, "decoded", got, want) {
+			t.Fatalf("%T decoding %x differs from protobuf-go", got, b)
 		}
+		wire, refErr := det.Marshal(want)
+		if refErr != nil || !bytes.Equal(marshal(), wire) {
+			t.Fatalf("%T round trip of %x differs from protobuf-go", got, b)
+		}
+		return true
 	}
-	var d2 ConfChangeV2
-	ok2 := UnmarshalConfChangeV2(b, &d2) == nil
-	if ok2 {
-		var p2 ConfChangeV2
-		if err := proto.Unmarshal(b, &p2); err != nil {
-			t.Fatalf("UnmarshalConfChangeV2 accepts %x, proto.Unmarshal: %v", b, err)
-		}
-		if !same(t, "fuzz ConfChangeV2", &d2, &p2) {
-			t.Fatalf("UnmarshalConfChangeV2(%x) = %v, proto.Unmarshal = %v", b, &d2, &p2)
-		}
-		if e := MarshalConfChangeV2(&d2); !bytes.Equal(e, b) {
-			t.Fatalf("UnmarshalConfChangeV2 accepts %x, which re-encodes to %x", b, e)
-		}
-	}
-	return ok1, ok2
+	var v1 ConfChange
+	var v2 ConfChangeV2
+	return check(&ConfChange{}, &v1, UnmarshalConfChangeV1(b, &v1), func() []byte { return MarshalConfChangeV1(&v1) }),
+		check(&ConfChangeV2{}, &v2, UnmarshalConfChangeV2(b, &v2), func() []byte { return MarshalConfChangeV2(&v2) })
 }
 
-func TestUnmarshalRejects(t *testing.T) {
+func TestUnmarshalWireCompatibility(t *testing.T) {
 	g := newGen(t)
 	accepted, rejected := 0, 0
 	for range iters {
@@ -529,8 +521,7 @@ func TestUnmarshalRejects(t *testing.T) {
 		}
 	}
 	t.Logf("accepted %d, rejected %d", accepted, rejected)
-	// Specific rejections: fields out of order or repeated, non-shortest varints, enum values
-	// that are no int32's encoding, truncated input, unknown fields.
+	// Compare valid alternative encodings and malformed inputs against protobuf-go.
 	for _, b := range [][]byte{
 		{0x10, 0x01, 0x08, 0x01}, // V1: type before id
 		{0x08, 0x01, 0x08, 0x01}, // V1: id twice
@@ -544,21 +535,7 @@ func TestUnmarshalRejects(t *testing.T) {
 		{0x1a, 0x00, 0x12, 0x00},                                           // V2: a change after the context
 		{0x12, 0x04, 0x10, 0x01, 0x08, 0x01},                               // V2: a change with node_id before type
 	} {
-		ok1, ok2 := checkDecode(t, b)
-		if ok1 && ok2 {
-			t.Errorf("%x accepted by both decoders", b)
-		}
-	}
-	for _, b := range [][]byte{
-		{0x10, 0x80, 0x80, 0x80, 0x80, 0x08},
-		{0x08, 0x80, 0x00},
-		{0x12, 0x04, 0x10, 0x01, 0x08, 0x01},
-		{0x1a, 0x00, 0x12, 0x00},
-	} {
-		var d2 ConfChangeV2
-		if UnmarshalConfChangeV2(b, &d2) == nil {
-			t.Errorf("UnmarshalConfChangeV2 accepts %x", b)
-		}
+		checkDecode(t, b)
 	}
 	// A negative enum is a 10-byte varint, accepted (and agreeing with proto.Unmarshal, which
 	// keeps an out-of-range value of a closed enum in the field, as the round trip tests check).
