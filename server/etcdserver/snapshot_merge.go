@@ -24,6 +24,7 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
+	"go.etcd.io/etcd/server/v3/storage/schema/snapshotmeta"
 	"go.etcd.io/raft/v3/raftpb"
 )
 
@@ -49,10 +50,10 @@ func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi
 			if snapt == 0 {
 				snapt = terms.termAt(ci)
 			}
-			confState = schema.UnsafeConfStateFromBackend(lg, dbsnap)
+			confState = snapshotmeta.ReadConfState(lg, dbsnap, schema.Meta, schema.MetaConfStateName)
 			if confState == nil {
 				// Pre-3.5 backends store membership without a ConfState.
-				members, err := schema.UnsafeReadMembers(lg, dbsnap)
+				members, err := snapshotmeta.ReadMembers(lg, dbsnap, schema.Members)
 				if err != nil {
 					lg.Panic("couldn't read members from snapshot", zap.Error(err))
 				}

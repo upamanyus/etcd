@@ -25,6 +25,7 @@ import (
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/schema/snapshotmeta"
 )
 
 const (
@@ -90,21 +91,7 @@ func (s *membershipBackend) MustReadMembersFromBackend() (map[types.ID]*membersh
 
 // UnsafeReadMembers reads the membership at the caller's transaction.
 func UnsafeReadMembers(lg *zap.Logger, tx backend.UnsafeReader) (map[types.ID]*membership.Member, error) {
-	members := make(map[types.ID]*membership.Member)
-	err := tx.UnsafeForEach(Members, func(k, v []byte) error {
-		memberID := mustParseMemberIDFromBytes(lg, k)
-		m := &membership.Member{ID: memberID}
-		if err := json.Unmarshal(v, &m); err != nil {
-			return err
-		}
-		members[memberID] = m
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("couldn't read members from backend: %w", err)
-	}
-
-	return members, nil
+	return snapshotmeta.ReadMembers(lg, tx, Members)
 }
 
 func (s *membershipBackend) readMembersFromBackend() (map[types.ID]*membership.Member, map[types.ID]bool, error) {
@@ -188,11 +175,7 @@ func (s *membershipBackend) MustCreateBackendBuckets() {
 }
 
 func mustParseMemberIDFromBytes(lg *zap.Logger, key []byte) types.ID {
-	id, err := types.IDFromString(string(key))
-	if err != nil {
-		lg.Panic("failed to parse member id from key", zap.Error(err))
-	}
-	return id
+	return snapshotmeta.MustParseMemberID(lg, key)
 }
 
 // ClusterVersionFromBackend reads cluster version from backend.

@@ -16,11 +16,11 @@ package schema
 
 import (
 	"encoding/json"
-	"log"
 
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/schema/snapshotmeta"
 	"go.etcd.io/raft/v3/raftpb"
 )
 
@@ -38,22 +38,5 @@ func MustUnsafeSaveConfStateToBackend(lg *zap.Logger, tx backend.UnsafeWriter, c
 // UnsafeConfStateFromBackend retrieves ConfState from the backend.
 // Returns nil if confState in backend is not persisted (e.g. backend written by <v3.5).
 func UnsafeConfStateFromBackend(lg *zap.Logger, tx backend.UnsafeReader) *raftpb.ConfState {
-	keys, vals := tx.UnsafeRange(Meta, MetaConfStateName, nil, 0)
-	if len(keys) == 0 {
-		return nil
-	}
-
-	if len(keys) != 1 {
-		lg.Panic(
-			"unexpected number of key: "+string(MetaConfStateName)+" when getting cluster version from backend",
-			zap.Int("number-of-key", len(keys)),
-		)
-	}
-	var confState raftpb.ConfState
-	if err := json.Unmarshal(vals[0], &confState); err != nil {
-		log.Panic("Cannot unmarshal confState json retrieved from the backend",
-			zap.ByteString("conf-state-json", vals[0]),
-			zap.Error(err))
-	}
-	return &confState
+	return snapshotmeta.ReadConfState(lg, tx, Meta, MetaConfStateName)
 }
