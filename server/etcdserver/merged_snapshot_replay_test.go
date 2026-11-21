@@ -39,11 +39,20 @@ func (tr replaySnapTransport) SendSnapshot(m *snap.Message) { tr.send(m) }
 // replayed only through 3 when it takes a current-term MsgSnap. Compare the
 // label with the metadata in the database bytes delivered to the follower.
 func TestMergedSnapshotDuringReplay(t *testing.T) {
-	t.Run("stored metadata", func(t *testing.T) { testReplaySnapshot(t, false) })
-	t.Run("pre-3.5 metadata", func(t *testing.T) { testReplaySnapshot(t, true) })
+	for _, tc := range []struct {
+		name              string
+		legacy, bootstrap bool
+	}{
+		{"stored metadata", false, false},
+		{"pre-3.5 metadata", true, false},
+		{"recovered current backend", false, true},
+		{"recovered pre-3.5 backend", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testReplaySnapshot(t, tc.legacy, tc.bootstrap) })
+	}
 }
 
-func testReplaySnapshot(t *testing.T, legacy bool) {
+func testReplaySnapshot(t *testing.T, legacy, bootstrap bool) {
 	lg := zaptest.NewLogger(t)
 	be, path := betesting.NewDefaultTmpBackend(t)
 	conf := &raftpb.ConfState{Voters: []uint64{1, 2, 3}, Learners: []uint64{4}}
@@ -57,7 +66,7 @@ func testReplaySnapshot(t *testing.T, legacy bool) {
 		schema.MustUnsafeSaveConfStateToBackend(lg, tx, conf)
 	}
 	tx.Unlock()
-	if legacy {
+	if legacy || bootstrap {
 		members := schema.NewMembershipBackend(lg, be)
 		members.MustCreateBackendBuckets()
 		for id := 1; id <= 4; id++ {
@@ -117,6 +126,12 @@ func testReplaySnapshot(t *testing.T, legacy bool) {
 		Snapshot: &raftpb.Snapshot{Metadata: &raftpb.SnapshotMetadata{Index: new(uint64(3)), Term: new(uint64(1))}},
 	}
 	ep := etcdProgress{appliedi: 3, appliedt: 1, confState: &raftpb.ConfState{Voters: []uint64{1, 2, 3}}}
+	if bootstrap {
+		// This is the configuration bootstrap actually installs. The WAL
+		// snapshot and the replay cursor can predate learner 4.
+		conf := buildConfStateFromV3store(lg, be)
+		ep.replayConf = &conf
+	}
 	// HardState.Commit can lag a committed backend across a power loss.
 	bwal := &bootstrappedWAL{
 		meta:     &snapshotMetadata{nodeID: 1},

@@ -732,6 +732,9 @@ func (s *EtcdServer) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 }
 
 type etcdProgress struct {
+	// Bootstrap rebuilds this configuration from the initial backend's members.
+	// Keep it across replay, independently of the cursor's configuration.
+	replayConf          *raftpb.ConfState
 	confState           *raftpb.ConfState
 	diskSnapshotIndex   uint64
 	memorySnapshotIndex uint64
@@ -801,6 +804,7 @@ func (s *EtcdServer) run() {
 	s.r.start(rh)
 
 	ep := etcdProgress{
+		replayConf:          sn.Metadata.ConfState,
 		confState:           sn.Metadata.ConfState,
 		diskSnapshotIndex:   sn.Metadata.GetIndex(),
 		memorySnapshotIndex: sn.Metadata.GetIndex(),
@@ -1005,7 +1009,7 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 	case m := <-s.r.msgSnapC:
 		// The applied content must belong to the term in which Raft sent the snapshot.
 		if m.GetTerm() == apply.raftTerm {
-			merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState, apply.replayTerms)
+			merged := s.createMergedSnapshotMessage(m, ep.appliedt, ep.appliedi, ep.confState, apply.replayTerms, ep.replayConf)
 			s.sendMergedSnap(merged)
 		} else {
 			// A dropped snapshot must be reported failed: raft keeps the follower's progress in
@@ -1171,6 +1175,7 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	ep.diskSnapshotIndex = ep.appliedi
 	ep.memorySnapshotIndex = ep.appliedi
 	ep.confState = toApply.snapshot.Metadata.ConfState
+	ep.replayConf = nil // subsequent images belong to the newly installed backend
 
 	// As the backend and the alarms changed, we need to re-bootstrap Appliers.
 	s.uberApply = s.NewUberApplier()

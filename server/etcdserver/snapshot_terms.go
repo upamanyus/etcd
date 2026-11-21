@@ -59,6 +59,11 @@ func (r replayTerms) appendEntries(ents []*raftpb.Entry) replayTerms {
 	return out
 }
 
+// covers reports whether an index is in this Ready's retained log suffix.
+func (r replayTerms) covers(index uint64) bool {
+	return len(r) > 0 && r[0].first <= index && index <= r[len(r)-1].last
+}
+
 // termAt reads an index in this batch's log. The caller holds a current-term
 // snapshot request from this member. Its elected log contains the committed
 // backend prefix, even if the recovered HardState.Commit was lower.

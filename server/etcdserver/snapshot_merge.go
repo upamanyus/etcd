@@ -30,7 +30,7 @@ import (
 // createMergedSnapshotMessage creates a snapshot message that contains: raft status (term, conf),
 // a snapshot of v2 store inside raft.Snapshot as []byte, a snapshot of v3 KV in the top level message
 // as ReadCloser.
-func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi uint64, confState *raftpb.ConfState, terms replayTerms) *snap.Message {
+func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi uint64, confState *raftpb.ConfState, terms replayTerms, replayConf *raftpb.ConfState) *snap.Message {
 	lg := s.Logger()
 
 	// commit kv to write metadata(for example: consistent index).
@@ -38,19 +38,27 @@ func (s *EtcdServer) createMergedSnapshotMessage(m *raftpb.Message, snapt, snapi
 	dbsnap := s.be.Snapshot()
 	if ci, term := schema.UnsafeReadConsistentIndex(dbsnap); ci > snapi {
 		snapi = ci
-		snapt = term
-		if snapt == 0 {
+		if replayConf != nil && terms.covers(ci) {
+			// The backend is still the one opened at bootstrap. Use the
+			// configuration recovered from its members and the entry term
+			// from this Ready, before a later Ready can replace its suffix.
 			snapt = terms.termAt(ci)
-		}
-		confState = schema.UnsafeConfStateFromBackend(lg, dbsnap)
-		if confState == nil {
-			// Pre-3.5 backends store membership without a ConfState.
-			members, err := schema.UnsafeReadMembers(lg, dbsnap)
-			if err != nil {
-				lg.Panic("couldn't read members from snapshot", zap.Error(err))
+			confState = replayConf
+		} else {
+			snapt = term
+			if snapt == 0 {
+				snapt = terms.termAt(ci)
 			}
-			cs := confStateFromMembers(members)
-			confState = &cs
+			confState = schema.UnsafeConfStateFromBackend(lg, dbsnap)
+			if confState == nil {
+				// Pre-3.5 backends store membership without a ConfState.
+				members, err := schema.UnsafeReadMembers(lg, dbsnap)
+				if err != nil {
+					lg.Panic("couldn't read members from snapshot", zap.Error(err))
+				}
+				cs := confStateFromMembers(members)
+				confState = &cs
+			}
 		}
 	}
 	// get a snapshot of v3 KV as readCloser
