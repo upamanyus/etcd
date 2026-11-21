@@ -278,31 +278,33 @@ func (p *ProgressTracker) OneLessThanQuorumInReplicationSet() map[uint64]quorum.
 	}
 
 	epoch := p.Epoch
-	// The witness of both halves of a joint configuration is sent an entry only if both
-	// halves have it in their replication sets. Its acknowledgement counts in both halves'
-	// commit, and a vote it grants is checked against the incoming half's replication set
-	// only: an entry acknowledged by quorum-1 of one half's replication set alone, with the
-	// witness excluded from the other's, would let a candidate lacking the committed entry win
-	// with the witness's vote.
-	if epoch.ReplicationSet[0].Witness != 0 &&
-		epoch.ReplicationSet[0].Witness == epoch.ReplicationSet[1].Witness && w1 != w2 {
-		return nil
-	}
+	shared := epoch.ReplicationSet[0].Witness != 0 &&
+		epoch.ReplicationSet[0].Witness == epoch.ReplicationSet[1].Witness
 	indexer := scopedAckIndexer{indexer: matchAckIndexer(p.Progress), scope: epoch.ReplicationSet[0].NonWitnessVoters}
 	result := map[uint64]quorum.Index{}
 
-	if w1 {
-		result[epoch.ReplicationSet[0].Witness] = p.Voters[0].OneLessThanQuorum(indexer)
+	if w1 || shared {
+		result[epoch.ReplicationSet[0].Witness] = witnessIndex(p.Voters[0], indexer, w1)
 	}
-	if w2 {
+	if w2 || shared {
 		indexer.scope = epoch.ReplicationSet[1].NonWitnessVoters
-		idx := p.Voters[1].OneLessThanQuorum(indexer)
+		idx := witnessIndex(p.Voters[1], indexer, w2)
 		if idx1, ok := result[epoch.ReplicationSet[1].Witness]; !ok || idx < idx1 {
 			result[epoch.ReplicationSet[1].Witness] = idx
 		}
 	}
 
 	return result
+}
+
+// A shared witness acknowledges one index for both halves. In a half that
+// selected it, the witness supplies the last vote. A half that excluded it
+// must already have a majority of regular voters at the index.
+func witnessIndex(voters quorum.MajorityConfig, indexer quorum.AckedIndexer, selected bool) quorum.Index {
+	if selected {
+		return voters.OneLessThanQuorum(indexer)
+	}
+	return voters.CommittedIndex(indexer)
 }
 
 // Visit invokes the supplied closure for all tracked progresses in stable order.
