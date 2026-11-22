@@ -608,8 +608,7 @@ func ContextError(ctx context.Context, err error) error {
 		return nil
 	}
 	err = rpctypes.Error(err)
-	var serverErr rpctypes.EtcdError
-	if errors.As(err, &serverErr) {
+	if _, ok := errors.AsType[rpctypes.EtcdError](err); ok {
 		return err
 	}
 	if ev, ok := status.FromError(err); ok {

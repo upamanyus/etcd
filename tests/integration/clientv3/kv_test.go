@@ -740,8 +740,7 @@ func TestKVLargeRequests(t *testing.T) {
 		cli := clus.Client(0)
 		_, err := cli.Put(t.Context(), "foo", strings.Repeat("a", test.valueSize))
 
-		var etcdErr rpctypes.EtcdError
-		if errors.As(err, &etcdErr) {
+		if _, ok := errors.AsType[rpctypes.EtcdError](err); ok {
 			if !errors.Is(err, test.expectError) {
 				t.Errorf("#%d: expected %v, got %v", i, test.expectError, err)
 			}

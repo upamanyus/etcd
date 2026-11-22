@@ -297,8 +297,7 @@ func (lkv *leasingKV) acquire(ctx context.Context, key string, op v3.Op) (*v3.Tx
 			return resp, nil
 		}
 		// retry if transient error
-		var serverErr rpctypes.EtcdError
-		if errors.As(err, &serverErr) {
+		if _, ok := errors.AsType[rpctypes.EtcdError](err); ok {
 			return nil, err
 		}
 		if ev, ok := status.FromError(err); ok && ev.Code() != codes.Unavailable {

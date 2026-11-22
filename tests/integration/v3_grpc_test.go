@@ -2348,8 +2348,7 @@ func TestV3AdditionalGRPCOptions(t *testing.T) {
 			kvcli := integration.ToGRPC(clus.Client(0)).KV
 			reqput := &pb.PutRequest{Key: []byte("foo"), Value: make([]byte, test.valueSize)}
 			if _, err := kvcli.Put(t.Context(), reqput); err != nil {
-				var etcdErr rpctypes.EtcdError
-				if errors.As(err, &etcdErr) {
+				if _, ok := errors.AsType[rpctypes.EtcdError](err); ok {
 					if err.Error() != status.Convert(test.expectError).Message() {
 						t.Errorf("expected %v, got %v", status.Convert(test.expectError).Message(), err.Error())
 					}
@@ -2389,8 +2388,7 @@ func mustGRPCStatus(err error) *status.Status {
 	}
 	// In grpcproxy mode, ToGRPC adapters bypass the gRPC wire so errors
 	// arrive as rpctypes.EtcdError instead of gRPC status errors.
-	var etcdErr rpctypes.EtcdError
-	if errors.As(err, &etcdErr) {
+	if etcdErr, ok := errors.AsType[rpctypes.EtcdError](err); ok {
 		return status.New(etcdErr.Code(), etcdErr.Error())
 	}
 	panic(fmt.Sprintf("eqErrGRPC: not a gRPC status error: %T %v", err, err))

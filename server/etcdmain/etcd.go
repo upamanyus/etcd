@@ -128,8 +128,7 @@ func startEtcdOrProxyV2(args []string) {
 	}
 
 	if err != nil {
-		var derr *errors.DiscoveryError
-		if errorspkg.As(err, &derr) {
+		if _, ok := errorspkg.AsType[*errors.DiscoveryError](err); ok {
 			lg.Warn(
 				"failed to bootstrap; discovery token was already used",
 				zap.String("discovery-token", cfg.ec.DiscoveryCfg.Token),

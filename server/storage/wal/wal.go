@@ -348,8 +348,7 @@ func (w *WAL) renameWAL(tmpdirpath string) (*WAL, error) {
 	// but there is a window between the fork and the exec where another
 	// process holds the lock.
 	if err := os.Rename(tmpdirpath, w.dir); err != nil {
-		var linkErr *os.LinkError
-		if errors.As(err, &linkErr) {
+		if _, ok := errors.AsType[*os.LinkError](err); ok {
 			return w.renameWALUnlock(tmpdirpath)
 		}
 		return nil, err
