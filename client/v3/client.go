@@ -314,6 +314,10 @@ func (c *Client) dialWithBalancer(dopts ...grpc.DialOption) (*grpc.ClientConn, e
 	return c.dial(creds, opts...)
 }
 
+// clientTargetSeq numbers the clients' dial targets: each target's host is unique to its client
+// (it was the client's address, %p, which a later client may reuse once this one is freed).
+var clientTargetSeq atomic.Uint64
+
 // dial configures and dials any grpc balancer target.
 func (c *Client) dial(creds grpccredentials.TransportCredentials, dopts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	opts := c.dialSetupOpts(creds, dopts...)
@@ -324,7 +328,7 @@ func (c *Client) dial(creds grpccredentials.TransportCredentials, dopts ...grpc.
 
 	opts = append(opts, c.cfg.DialOptions...)
 
-	target := fmt.Sprintf("%s://%p/%s", resolver.Schema, c, authority(c.endpoints[0]))
+	target := fmt.Sprintf("%s://0x%x/%s", resolver.Schema, clientTargetSeq.Add(1), authority(c.endpoints[0]))
 	return grpc.NewClient(target, opts...)
 }
 
