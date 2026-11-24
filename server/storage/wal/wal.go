@@ -527,6 +527,11 @@ func openWALFiles(lg *zap.Logger, dirpath string, names []string, nameIndex int,
 //
 // ReadAll may return uncommitted yet entries, that are subject to be overridden.
 // Do not apply entries that have index > state.commit, as they are subject to change.
+//
+// ReadAll drops the entry records that no record follows: a Save that writes entries ends with a
+// state record, so they are those of a Save a crash interrupted before its fsync, of which
+// nothing was acknowledged. A Save torn by a crash reads back as no Save. In write mode they are
+// cut from the tail, so that the next records are written over them.
 func (w *WAL) ReadAll() (metadata []byte, state *raftpb.HardState, ents []*raftpb.Entry, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -547,15 +552,32 @@ func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 
 	var match bool
 	segment := 0
+	// The entry records of a Save count only once a later record follows them: a Save that
+	// writes entries ends with a state record (Save), so entry records no record follows belong
+	// to a Save a crash interrupted (before its fsync, so before anything was acknowledged from
+	// it), which reads back as no Save. pending holds them; pendOff and pendCRC are the tail's
+	// offset and the CRC chain before the first of them, where a write-mode read cuts the tail.
+	var pending []*raftpb.Entry
+	var pendOff int64
+	var pendCRC uint32
+	lastOff := decoder.LastOffset()
+	lastCRC := decoder.LastCRC()
 	// The log the records write is the log at the start snapshot's index followed by ents. An
 	// entry written at or below the start index truncates the log there, so the entries above it
 	// go. At the start snapshot's own record, a snapshot above the commit index saved before it
 	// is one raft received and installed (its own snapshots are of applied, so committed,
 	// entries): raft discarded the log it had, so the entries above the start index go too.
 	for err = decoder.Decode(rec); err == nil; err = decoder.Decode(rec) {
-		switch rec.GetType() {
-		case EntryType:
-			e := MustUnmarshalEntry(rec.Data)
+		if rec.GetType() == EntryType {
+			if len(pending) == 0 {
+				pendOff, pendCRC = lastOff, lastCRC
+			}
+			pending = append(pending, MustUnmarshalEntry(rec.Data))
+			lastOff, lastCRC = decoder.LastOffset(), decoder.LastCRC()
+			continue
+		}
+		// A record follows the pending entry records: they count.
+		for _, e := range pending {
 			if e.GetIndex() <= w.start.GetIndex() {
 				ents = ents[:0]
 			}
@@ -583,7 +605,10 @@ func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 				ents = append(ents[:offset], e)
 			}
 			w.enti = e.GetIndex()
+		}
+		pending = pending[:0]
 
+		switch rec.GetType() {
 		case StateType:
 			state = MustUnmarshalState(rec.Data)
 
@@ -650,6 +675,7 @@ func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 			state.Reset()
 			return nil, state, nil, fmt.Errorf("unexpected block type %d", rec.GetType())
 		}
+		lastOff, lastCRC = decoder.LastOffset(), decoder.LastCRC()
 	}
 
 	if !match && fallback != nil && (errors.Is(err, io.EOF) || (w.tail() == nil && errors.Is(err, io.ErrUnexpectedEOF))) {
@@ -683,7 +709,12 @@ func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 		// not all, will cause CRC errors on WAL open. Since the records
 		// were never fully synced to disk in the first place, it's safe
 		// to zero them out to avoid any CRC errors from new writes.
-		if _, err = w.tail().Seek(w.decoder.LastOffset(), io.SeekStart); err != nil {
+		// The entry records of an interrupted Save (pending) go too: the next Save writes over them.
+		endOff := w.decoder.LastOffset()
+		if len(pending) > 0 {
+			endOff = pendOff
+		}
+		if _, err = w.tail().Seek(endOff, io.SeekStart); err != nil {
 			return nil, state, nil, err
 		}
 		if err = fileutil.ZeroToEnd(w.tail().File); err != nil {
@@ -726,7 +757,11 @@ func (w *WAL) readAll() (metadata []byte, state *raftpb.HardState, ents []*raftp
 
 	if w.tail() != nil {
 		// create encoder (chain crc with the decoder), enable appending
-		w.encoder, err = newFileEncoder(w.tail().File, w.decoder.LastCRC())
+		endCRC := w.decoder.LastCRC()
+		if len(pending) > 0 {
+			endCRC = pendCRC
+		}
+		w.encoder, err = newFileEncoder(w.tail().File, endCRC)
 		if err != nil {
 			return nil, state, nil, err
 		}
@@ -1263,6 +1298,11 @@ func (w *WAL) saveState(s *raftpb.HardState) error {
 	if raft.IsEmptyHardState(s) {
 		return nil
 	}
+	return w.encodeState(s)
+}
+
+// encodeState writes a state record of s, also when s is empty.
+func (w *WAL) encodeState(s *raftpb.HardState) error {
 	w.state = s
 	b := pbutil.MustMarshalMessage(s)
 	rec := &walpb.Record{Type: new(StateType), Data: b}
@@ -1280,6 +1320,9 @@ const saveEntryOverhead = 64
 
 var ErrSaveBatchTooLarge = errors.New("wal: batch exceeds MaxSaveBatchBytes")
 
+// Save writes the entries, then a state record: st, or the hard state last saved when st is
+// empty and there are entries, so that a Save a crash interrupts reads back as none (ReadAll).
+// It syncs when raft.MustSync says so (always when there are entries).
 func (w *WAL) Save(st *raftpb.HardState, ents []*raftpb.Entry) error {
 	var n int64
 	for _, e := range ents {
@@ -1311,7 +1354,17 @@ func (w *WAL) Save(st *raftpb.HardState, ents []*raftpb.Entry) error {
 			return err
 		}
 	}
-	if err := w.saveState(st); err != nil {
+	// A Save that writes entries ends with a state record, the current hard state when st is
+	// empty: ReadAll counts entry records only once a record follows them, so that a Save a crash
+	// interrupts (its records written in part, or all but not synced) reads back as no Save.
+	if len(ents) > 0 {
+		if raft.IsEmptyHardState(st) {
+			st = w.state
+		}
+		if err := w.encodeState(st); err != nil {
+			return err
+		}
+	} else if err := w.saveState(st); err != nil {
 		return err
 	}
 
