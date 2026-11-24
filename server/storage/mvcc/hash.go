@@ -15,9 +15,10 @@
 package mvcc
 
 import (
+	"cmp"
 	"hash"
 	"hash/crc32"
-	"sort"
+	"slices"
 	"sync"
 
 	"go.uber.org/zap"
@@ -162,8 +163,8 @@ func (s *hashStorage) Store(hash KeyValueHash) {
 	s.hashMu.Lock()
 	defer s.hashMu.Unlock()
 	s.hashes = append(s.hashes, hash)
-	sort.Slice(s.hashes, func(i, j int) bool {
-		return s.hashes[i].Revision < s.hashes[j].Revision
+	slices.SortFunc(s.hashes, func(a, b KeyValueHash) int {
+		return cmp.Compare(a.Revision, b.Revision)
 	})
 	if len(s.hashes) > hashStorageMaxSize {
 		s.hashes = s.hashes[len(s.hashes)-hashStorageMaxSize:]
