@@ -29,6 +29,7 @@ import (
 	"go.uber.org/zap"
 
 	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/verify"
 )
 
@@ -591,6 +592,12 @@ func (b *backend) finishDefrag(tmpdb *bolt.DB, tdbp, dbp string, now time.Time, 
 	if err != nil {
 		b.cleanupTmpDB(tmpdb, tdbp)
 		b.lg.Fatal("failed to rename tmp database", zap.Error(err))
+	}
+	// Make the rename durable before the database is reopened and committed to: without
+	// the directory's sync a power loss can undo the rename after later commits went
+	// to the new file.
+	if err = syncParentDir(dbp); err != nil {
+		b.lg.Fatal("failed to sync database directory", zap.Error(err))
 	}
 
 	b.db, err = bolt.Open(dbp, 0o600, b.bopts)
@@ -1161,4 +1168,17 @@ func (zl *zapBoltLogger) Warning(args ...any) {
 
 func (zl *zapBoltLogger) Warningf(format string, args ...any) {
 	zl.SugaredLogger.Warnf(format, args...)
+}
+
+// syncParentDir fsyncs the directory holding path, so that a rename onto path is durable.
+func syncParentDir(path string) error {
+	df, err := fileutil.OpenDir(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err = fileutil.Fsync(df); err != nil {
+		df.Close()
+		return err
+	}
+	return df.Close()
 }
