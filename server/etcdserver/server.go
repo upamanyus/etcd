@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1839,7 +1840,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 			lg.Warn(
 				"stopped publish because server is stopping",
 				zap.String("local-member-id", s.MemberID().String()),
-				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.String("local-member-attributes", fmt.Sprintf("{Name:%s ClientURLs:[%s]}", s.attributes.Name, strings.Join(s.attributes.ClientURLs, " "))),
 				zap.Duration("publish-timeout", timeout),
 			)
 			return
@@ -1856,7 +1857,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 			lg.Info(
 				"published local member to cluster through raft",
 				zap.String("local-member-id", s.MemberID().String()),
-				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.String("local-member-attributes", fmt.Sprintf("{Name:%s ClientURLs:[%s]}", s.attributes.Name, strings.Join(s.attributes.ClientURLs, " "))),
 				zap.String("cluster-id", s.cluster.ID().String()),
 				zap.Duration("publish-timeout", timeout),
 			)
@@ -1866,7 +1867,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 			lg.Warn(
 				"failed to publish local member to cluster through raft",
 				zap.String("local-member-id", s.MemberID().String()),
-				zap.String("local-member-attributes", fmt.Sprintf("%+v", s.attributes)),
+				zap.String("local-member-attributes", fmt.Sprintf("{Name:%s ClientURLs:[%s]}", s.attributes.Name, strings.Join(s.attributes.ClientURLs, " "))),
 				zap.Duration("publish-timeout", timeout),
 				zap.Error(err),
 			)
