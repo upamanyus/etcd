@@ -17,9 +17,12 @@ package storage
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
@@ -68,6 +71,10 @@ func OpenSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot
 	if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%w)", err)
 	}
+	// Make the rename durable before the backend is opened and committed to.
+	if err := syncDir(filepath.Dir(cfg.BackendPath())); err != nil {
+		return nil, fmt.Errorf("failed to sync database directory (%w)", err)
+	}
 	return OpenBackend(cfg, hooks), nil
 }
 
@@ -115,4 +122,17 @@ func RecoverSnapshotBackend(cfg config.ServerConfig, oldbe backend.Backend, snap
 	cfg.Logger.Info("Recovering from snapshot backend", zap.Uint64("consistent-index", consistentIndex), zap.Uint64("snapshot-index", snapshot.Metadata.GetIndex()))
 	oldbe.Close()
 	return OpenSnapshotBackend(cfg, snap.New(cfg.Logger, cfg.SnapDir()), snapshot, hooks)
+}
+
+// syncDir fsyncs the directory dir.
+func syncDir(dir string) error {
+	df, err := fileutil.OpenDir(dir)
+	if err != nil {
+		return err
+	}
+	if err = fileutil.Fsync(df); err != nil {
+		df.Close()
+		return err
+	}
+	return df.Close()
 }
