@@ -70,7 +70,7 @@ func (e *Election) Campaign(ctx context.Context, val string) error {
 	s := e.session
 	client := e.session.Client()
 
-	k := fmt.Sprintf("%s%x", e.keyPrefix, s.Lease())
+	k := fmt.Sprintf("%s%x", e.keyPrefix, int64(s.Lease()))
 	txn := client.KV.Txn(ctx).If(v3.Compare(v3.CreateRevision(k), "=", 0))
 	txn = txn.Then(v3.OpPut(k, val, v3.WithLease(s.Lease())))
 	txn = txn.Else(v3.OpGet(k))
