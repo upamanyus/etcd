@@ -28,9 +28,11 @@ import (
 // TestWALTypeTearStale: the last frame is a state record (the unsynced hard state {1,1,2}); its
 // Type byte comes back as the byte under it before the write, here 0x02 (EntryType), as when that
 // offset held a stale entry record (upstream: ReadAll's zeroing of the torn tail lost; the fork:
-// only under a reused N.tmp's remnant). The restart accepts the hard state's bytes as an entry:
-// HardState{term 1, vote 1, commit 2} parses as Entry{Type 1 (ConfChange), Term 1, Index 2}, which
-// replaces the synced, committed entry 2 (a normal entry with 40 bytes of data).
+// only under a reused N.tmp's remnant). Before ReadAll dropped trailing entry records, the restart
+// accepted the hard state's bytes as an entry: HardState{term 1, vote 1, commit 2} parses as
+// Entry{Type 1 (ConfChange), Term 1, Index 2}, which replaced the synced, committed entry 2 (a
+// normal entry with 40 bytes of data). Now the torn Save's records (entry 3, and the state record
+// read as an entry) are trailing entry records, dropped: the Save reads back as none.
 //
 // TestWALTypeTearZero: the same with the byte under it zero (the fork's case, and the preallocated
 // tail): the record has Type 0, the decoder accepts it, ReadAll fails with "unexpected block type
@@ -56,10 +58,11 @@ func TestWALTypeTearStale(t *testing.T) {
 	o := bmTypeTear(t, byte(EntryType))
 	t.Logf("restart: %s %s", o.kind, bmShort(o))
 	require.Equal(t, "ok", o.kind)
+	require.Len(t, o.ents, 2)
 	e2 := o.ents[1]
 	require.Equal(t, uint64(2), e2.GetIndex())
-	require.Equal(t, raftpb.EntryConfChange, e2.GetType()) // written: EntryNormal, 40 bytes
-	require.Empty(t, e2.GetData())
+	require.Equal(t, raftpb.EntryNormal, e2.GetType()) // as written: EntryNormal, 40 bytes
+	require.Len(t, e2.GetData(), 40)
 }
 
 func TestWALTypeTearZero(t *testing.T) {
