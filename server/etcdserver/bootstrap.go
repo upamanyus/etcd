@@ -75,6 +75,16 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 	}
 
 	haveWAL := wal.Exist(cfg.WALDir())
+	if haveWAL {
+		// A WAL that holds nothing a Save wrote (a crash after wal.Create and before the first
+		// Save completed) holds raft's initial state: bootstrap as if there were no WAL, as
+		// before the crash, rather than restart raft on an empty log.
+		discarded, derr := wal.DiscardUnsaved(cfg.Logger, cfg.WALDir())
+		if derr != nil {
+			return nil, fmt.Errorf("cannot discard the unsaved WAL: %w", derr)
+		}
+		haveWAL = !discarded
+	}
 	backend, err := bootstrapBackend(cfg, haveWAL)
 	if err != nil {
 		return nil, err

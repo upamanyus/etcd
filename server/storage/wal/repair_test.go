@@ -135,7 +135,9 @@ func TestRepairWriteTearLast(t *testing.T) {
 		}
 		return f.Truncate(offset)
 	}
-	testRepair(t, makeEnts(50), corruptf, 40)
+	// Each Save writes an entry record and a state record (an empty one: Save ends every Save
+	// with entries with a state record), so the first 1024 bytes hold 20 of them.
+	testRepair(t, makeEnts(50), corruptf, 20)
 }
 
 // TestRepairWriteTearMiddle repairs the WAL when there is write tearing
