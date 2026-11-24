@@ -399,7 +399,7 @@ func (s *store) restore() error {
 		if err != nil {
 			s.lg.Error(
 				"failed to attach a lease",
-				zap.String("lease-id", fmt.Sprintf("%016x", lid)),
+				zap.String("lease-id", fmt.Sprintf("%016x", int64(lid))),
 				zap.Error(err),
 			)
 		}
