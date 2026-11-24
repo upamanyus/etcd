@@ -1059,6 +1059,28 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	// wait for raftNode to persist snapshot onto the disk
 	<-toApply.notifyc
 
+	// After a crash the backend can be ahead of the WAL: the apply loop commits
+	// entries that the raft loop had not yet synced. Raft may then install a leader
+	// snapshot at or below the backend's consistent index. The backend already holds
+	// every entry up to that index, so keep it instead of replacing it by the older
+	// snapshot database (which would move the store's state back), and only move the
+	// applied state to the snapshot. Entries between the snapshot and the consistent
+	// index are skipped by the apply loop, as in any restart replay; the backend, the
+	// stores recovered from it and the replay configuration stay as they are.
+	if ci := s.consistIndex.ConsistentIndex(); toApply.snapshot.Metadata.GetIndex() <= ci {
+		lg.Info(
+			"backend already covers the snapshot; keeping it",
+			zap.Uint64("consistent-index", ci),
+			zap.Uint64("incoming-leader-snapshot-index", toApply.snapshot.Metadata.GetIndex()),
+		)
+		ep.appliedt = toApply.snapshot.Metadata.GetTerm()
+		ep.appliedi = toApply.snapshot.Metadata.GetIndex()
+		ep.diskSnapshotIndex = ep.appliedi
+		ep.memorySnapshotIndex = ep.appliedi
+		ep.confState = toApply.snapshot.Metadata.ConfState
+		return
+	}
+
 	bemuUnlocked := false
 	s.bemu.Lock()
 	defer func() {
