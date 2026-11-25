@@ -167,8 +167,13 @@ func observe(t *testing.T, srv *EtcdServer) unsavedAppliedObs {
 // A member that crashes after its apply thread committed the bootstrap Ready's conf changes to
 // the backend and before that Ready's WAL Save reached the disk restarts with an unsaved WAL and
 // a backend whose consistent index is the bootstrap's. The torn-Save fix bootstraps it fresh.
-// This test compares the restarted member with one that never crashed.
+// This test compares the restarted member with one that never crashed. At goose-lean-crashfixes
+// (71295dd6d) the restarted member's backend and raft snapshots held an empty ConfState: the
+// bootstrap entries were replayed at or below the backend's consistent index, where the apply
+// does not take raft's ConfState. The fix removes the backend with the unsaved WAL.
 func TestBootstrapUnsavedWALAppliedBackend(t *testing.T) {
+	// NewServer records the feature gates in a global gauge that TestAddFeatureGateMetrics reads.
+	t.Cleanup(serverFeatureEnabled.Reset)
 	dir := t.TempDir()
 	cfg := unsavedAppliedCfg(t, dir)
 	srv, err := NewServer(cfg)
@@ -194,6 +199,11 @@ func TestBootstrapUnsavedWALAppliedBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, unsaved, "the crash image's WAL holds a Save")
 
+	// A crash inside the restart's discard, after the backend's removal and before the WAL's.
+	removedDir := t.TempDir()
+	copyTree(t, crashDir, removedDir)
+	require.NoError(t, os.Remove(filepath.Join(removedDir, "member", "snap", "db")))
+
 	// The member that did not crash.
 	close(hold.release)
 	control := observe(t, srv)
@@ -213,6 +223,14 @@ func TestBootstrapUnsavedWALAppliedBackend(t *testing.T) {
 	assert.Equal(t, control.raftVoters, restarted.raftVoters, "raft's configuration")
 	assert.Equal(t, control.backendCS, restarted.backendCS, "the backend's ConfState")
 	assert.Equal(t, control.snapshotCS, restarted.snapshotCS, "the raft snapshot's ConfState")
+
+	srvR, err := NewServer(unsavedAppliedCfg(t, removedDir))
+	require.NoError(t, err, "restart after the backend's removal")
+	srvR.Start()
+	removed := observe(t, srvR)
+	srvR.HardStop()
+	t.Logf("removed:   %+v", removed)
+	assert.Equal(t, control, removed, "restart after the backend's removal")
 
 	// A third start, from the restarted member's WAL.
 	cfg3 := unsavedAppliedCfg(t, crashDir)

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -79,6 +80,20 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 		// A WAL that holds nothing a Save wrote (a crash after wal.Create and before the first
 		// Save completed) holds raft's initial state: bootstrap as if there were no WAL, as
 		// before the crash, rather than restart raft on an empty log.
+		//
+		// The backend goes too: the apply thread applies a Ready's committed entries (the
+		// bootstrap conf changes among them) while the raft loop saves that Ready, so the backend
+		// may hold entries the WAL does not; a fresh bootstrap over it replays them below its
+		// consistent index and records an empty ConfState. Until its first Save completed the
+		// member sent nothing, so what the backend applied is fetched again from raft. The
+		// backend is removed first, durably: a crash in between leaves the WAL unsaved, and the
+		// next start discards again.
+		unsaved, uerr := wal.Unsaved(cfg.Logger, cfg.WALDir())
+		if uerr == nil && unsaved {
+			if rerr := removeBackendDurably(cfg); rerr != nil {
+				return nil, fmt.Errorf("cannot remove the backend of an unsaved WAL: %w", rerr)
+			}
+		}
 		discarded, derr := wal.DiscardUnsaved(cfg.Logger, cfg.WALDir())
 		if derr != nil {
 			return nil, fmt.Errorf("cannot discard the unsaved WAL: %w", derr)
@@ -264,6 +279,27 @@ func bootstrapSnapshot(cfg config.ServerConfig) *snap.Snapshotter {
 	}
 
 	return snap.New(cfg.Logger, cfg.SnapDir())
+}
+
+// removeBackendDurably removes the backend file, if any, and syncs its directory.
+func removeBackendDurably(cfg config.ServerConfig) error {
+	bepath := cfg.BackendPath()
+	if err := os.Remove(bepath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	df, err := fileutil.OpenDir(filepath.Dir(bepath))
+	if err != nil {
+		return err
+	}
+	if err = fileutil.Fsync(df); err != nil {
+		df.Close()
+		return err
+	}
+	cfg.Logger.Info("removed the backend of a WAL that holds no saved state", zap.String("path", bepath))
+	return df.Close()
 }
 
 func bootstrapBackend(cfg config.ServerConfig, haveWAL bool) (backend *bootstrappedBackend, err error) {
