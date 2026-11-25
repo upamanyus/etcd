@@ -89,16 +89,17 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 		// backend is removed first, durably: a crash in between leaves the WAL unsaved, and the
 		// next start discards again.
 		unsaved, uerr := wal.Unsaved(cfg.Logger, cfg.WALDir())
-		if uerr == nil && unsaved {
+		if uerr != nil {
+			cfg.Logger.Warn("cannot tell whether the WAL holds saved state; keeping it", zap.String("wal-dir", cfg.WALDir()), zap.Error(uerr))
+		} else if unsaved {
 			if rerr := removeBackendDurably(cfg); rerr != nil {
 				return nil, fmt.Errorf("cannot remove the backend of an unsaved WAL: %w", rerr)
 			}
+			if derr := wal.Discard(cfg.Logger, cfg.WALDir()); derr != nil {
+				return nil, fmt.Errorf("cannot discard the unsaved WAL: %w", derr)
+			}
+			haveWAL = false
 		}
-		discarded, derr := wal.DiscardUnsaved(cfg.Logger, cfg.WALDir())
-		if derr != nil {
-			return nil, fmt.Errorf("cannot discard the unsaved WAL: %w", derr)
-		}
-		haveWAL = !discarded
 	}
 	backend, err := bootstrapBackend(cfg, haveWAL)
 	if err != nil {
