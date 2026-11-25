@@ -116,7 +116,7 @@ func TestSaveEntriesEmptyHardStateWritesState(t *testing.T) {
 }
 
 // Unsaved: a WAL as Create leaves it, or with the entry records of a torn first Save, holds
-// nothing saved, and DiscardUnsaved removes it (to Create's temporary directory); one Save
+// nothing saved, and Discard removes it (to Create's temporary directory); one Save
 // makes it saved.
 func TestUnsaved(t *testing.T) {
 	lg := zaptest.NewLogger(t)
@@ -143,11 +143,10 @@ func TestUnsaved(t *testing.T) {
 			unsaved, err := Unsaved(lg, dir)
 			require.NoError(t, err)
 			assert.Equal(t, tc.unsaved, unsaved)
-			discarded, err := DiscardUnsaved(lg, dir)
-			require.NoError(t, err)
-			assert.Equal(t, tc.unsaved, discarded)
-			assert.Equal(t, !tc.unsaved, Exist(dir))
+			assert.True(t, Exist(dir))
 			if tc.unsaved {
+				require.NoError(t, Discard(lg, dir))
+				assert.False(t, Exist(dir))
 				_, err := os.Stat(dir + ".tmp")
 				require.NoError(t, err)
 				// Create starts afresh over the leftover temporary directory.

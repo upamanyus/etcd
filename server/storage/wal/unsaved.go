@@ -90,33 +90,27 @@ func Unsaved(lg *zap.Logger, dirpath string) (bool, error) {
 	return true, nil
 }
 
-// DiscardUnsaved removes the WAL in dirpath if Unsaved reports that it holds nothing a Save
-// wrote, and reports whether it did. The WAL directory is renamed to Create's temporary
+// Discard removes the WAL in dirpath, which the caller found unsaved (Unsaved returned true,
+// nil) and whose backend it removed. The WAL directory is renamed to Create's temporary
 // directory (which Create removes) and the rename made durable, so that Exist reports no WAL,
-// atomically across a crash. A WAL that Unsaved cannot read is kept.
-func DiscardUnsaved(lg *zap.Logger, dirpath string) (bool, error) {
+// atomically across a crash. Discard does not check Unsaved again: a second check could answer
+// differently from the caller's (a transient read error in one of them), and the caller's check
+// is what its removal of the backend relied on.
+func Discard(lg *zap.Logger, dirpath string) error {
 	if lg == nil {
 		lg = zap.NewNop()
-	}
-	unsaved, uerr := Unsaved(lg, dirpath)
-	if uerr != nil {
-		lg.Warn("cannot tell whether the WAL holds saved state; keeping it", zap.String("wal-dir", dirpath), zap.Error(uerr))
-		return false, nil
-	}
-	if !unsaved {
-		return false, nil
 	}
 	dir := filepath.Clean(dirpath)
 	tmpdirpath := dir + ".tmp"
 	if err := os.RemoveAll(tmpdirpath); err != nil {
-		return false, err
+		return err
 	}
 	if err := os.Rename(dir, tmpdirpath); err != nil {
-		return false, err
+		return err
 	}
 	if err := syncDir(filepath.Dir(dir)); err != nil {
-		return false, err
+		return err
 	}
 	lg.Info("discarded a WAL that holds no saved state", zap.String("wal-dir", dirpath))
-	return true, nil
+	return nil
 }
