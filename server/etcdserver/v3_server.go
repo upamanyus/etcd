@@ -717,11 +717,43 @@ func (s *EtcdServer) LeaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveR
 	}
 
 	if r.Keys {
+		// The keys in resp come from a second lookup of the lease, made by the
+		// leader when this member forwarded the request, so they may differ from
+		// the ones checkLeaseTimeToLive checked: check them too.
+		if err := s.checkLeaseTimeToLiveKeys(ctx, resp.Keys); err != nil {
+			return nil, err
+		}
 		if s.AuthStore().IsAuthEnabled() && rev != s.AuthStore().Revision() {
 			return nil, auth.ErrAuthOldRevision
 		}
 	}
 	return resp, nil
+}
+
+// checkLeaseTimeToLiveKeys checks that the user of ctx may read each of keys,
+// the keys a LeaseTimeToLive response returns.
+func (s *EtcdServer) checkLeaseTimeToLiveKeys(ctx context.Context, keys [][]byte) error {
+	if !s.AuthStore().IsAuthEnabled() {
+		return nil
+	}
+	authInfo, err := s.AuthInfoFromCtx(ctx)
+	if err != nil {
+		return err
+	}
+	if authInfo == nil {
+		return auth.ErrUserEmpty
+	}
+
+	if s.AuthStore().IsAdminPermitted(authInfo) == nil {
+		return nil
+	}
+
+	for _, key := range keys {
+		if err := s.AuthStore().IsRangePermitted(authInfo, key, []byte{}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *EtcdServer) newHeader() *pb.ResponseHeader {
