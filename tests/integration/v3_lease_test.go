@@ -1169,6 +1169,87 @@ func testV3LeaseTimeToLiveWithLeaderChanged(t *testing.T, fpName string) {
 	require.NoError(t, <-errCh)
 }
 
+// TestV3LeaseTimeToLiveKeysPermission ensures that LeaseTimeToLive with keys
+// does not return a key the user may not read when the key is attached to the
+// lease after the permission check, on the leader and through a follower.
+func TestV3LeaseTimeToLiveKeysPermission(t *testing.T) {
+	t.Run("leader", func(t *testing.T) {
+		testV3LeaseTimeToLiveKeysPermission(t, 1, "beforeLookupWhenLeaseTimeToLive")
+	})
+	t.Run("follower", func(t *testing.T) {
+		testV3LeaseTimeToLiveKeysPermission(t, 3, "beforeLookupWhenForwardLeaseTimeToLive")
+	})
+}
+
+func testV3LeaseTimeToLiveKeysPermission(t *testing.T, size int, fpName string) {
+	integration.SkipIfNoGoFail(t)
+	integration.BeforeTest(t)
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: size})
+	defer clus.Terminate(t)
+
+	leadIdx := clus.WaitLeader(t)
+	// the user's member: the leader, or a follower, which checks its own
+	// lessor and forwards the request to the leader
+	userIdx := (leadIdx + 1) % size
+
+	authSetupRoot(t, integration.ToGRPC(clus.Client(leadIdx)).Auth)
+	rootc, err := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(leadIdx).Endpoints(), Username: "root", Password: "123"})
+	require.NoError(t, err)
+	defer rootc.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// the user may read "a" but not "b"
+	_, err = rootc.UserAdd(ctx, "user", "user-pw")
+	require.NoError(t, err)
+	_, err = rootc.RoleAdd(ctx, "role")
+	require.NoError(t, err)
+	_, err = rootc.RoleGrantPermission(ctx, "role", "a", "", clientv3.PermissionType(clientv3.PermRead))
+	require.NoError(t, err)
+	_, err = rootc.UserGrantRole(ctx, "user", "role")
+	require.NoError(t, err)
+
+	lresp, err := rootc.Grant(ctx, 100)
+	require.NoError(t, err)
+	_, err = rootc.Put(ctx, "a", "va", clientv3.WithLease(lresp.ID))
+	require.NoError(t, err)
+
+	userc, err := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(userIdx).Endpoints(), Username: "user", Password: "user-pw"})
+	require.NoError(t, err)
+	defer userc.Close()
+
+	ttlResp, err := userc.TimeToLive(ctx, lresp.ID, clientv3.WithAttachedKeys())
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{[]byte("a")}, ttlResp.Keys)
+
+	require.NoError(t, gofail.Enable(fpName, `sleep("2s")`))
+	t.Cleanup(func() {
+		terr := gofail.Disable(fpName)
+		if terr != nil && !errors.Is(terr, gofail.ErrDisabled) {
+			t.Fatalf("failed to disable %s: %v", fpName, terr)
+		}
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		resp, terr := userc.TimeToLive(ctx, lresp.ID, clientv3.WithAttachedKeys())
+		if terr == nil {
+			terr = fmt.Errorf("LeaseTimeToLive was not refused, keys %q", resp.Keys)
+		}
+		errCh <- terr
+	}()
+
+	// attach "b" while the request sleeps between its permission check and
+	// the lookup of the lease
+	time.Sleep(500 * time.Millisecond)
+	_, err = rootc.Put(ctx, "b", "vb", clientv3.WithLease(lresp.ID))
+	require.NoError(t, err)
+
+	require.ErrorIs(t, <-errCh, rpctypes.ErrPermissionDenied)
+}
+
 // acquireLeaseAndKey creates a new lease and creates an attached key.
 func acquireLeaseAndKey(clus *integration.Cluster, key string) (int64, error) {
 	// create lease
