@@ -273,6 +273,9 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 				}
 
 				// gofail: var raftBeforeSave struct{}
+				if h := reproHooks.Load(); h != nil && h.BeforeSave != nil {
+					h.BeforeSave(r, rd.Entries, rd.CommittedEntries)
+				}
 				if err := r.storage.Save(rd.HardState, rd.Entries); err != nil {
 					r.lg.Fatal("failed to save Raft hard state and entries", zap.Error(err))
 				}

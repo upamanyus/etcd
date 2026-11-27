@@ -982,6 +982,7 @@ func (s *EtcdServer) Defragment() error {
 }
 
 func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
+	reproApplyAll(s, "start", ep.appliedi)
 	s.applySnapshot(ep, apply)
 	s.applyEntries(ep, apply)
 	backend.VerifyBackendConsistency(s.Backend(), s.Logger(), true, schema.AllBuckets...)
@@ -1004,7 +1005,9 @@ func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
 		return
 	}
 
+	reproApplyAll(s, "beforeSnapshot", ep.appliedi)
 	s.snapshotIfNeededAndCompactRaftLog(ep)
+	reproApplyAll(s, "beforeMsgSnap", ep.appliedi)
 	select {
 	// snapshot requested via send()
 	case m := <-s.r.msgSnapC:
@@ -1180,6 +1183,9 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 
 	// As the backend and the alarms changed, we need to re-bootstrap Appliers.
 	s.uberApply = s.NewUberApplier()
+	if h := reproHooks.Load(); h != nil && h.AfterApplySnapshot != nil {
+		h.AfterApplySnapshot(s, ep.appliedi)
+	}
 }
 
 func (s *EtcdServer) NewUberApplier() apply.UberApplier {
