@@ -112,7 +112,11 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 			return nil, fmt.Errorf("cannot write to WAL directory: %w", err)
 		}
 		cfg.Logger.Info("Bootstrapping WAL from snapshot")
-		bwal = bootstrapWALFromSnapshot(cfg, backend.snapshot, backend.ci)
+		bwal, err = bootstrapWALFromSnapshot(cfg, backend)
+		if err != nil {
+			backend.Close()
+			return nil, err
+		}
 	}
 
 	cfg.Logger.Info("bootstrapping cluster")
@@ -667,8 +671,8 @@ func (b *bootstrappedRaft) newRaftNode(ss *snap.Snapshotter, wal *wal.WAL, cl *m
 	)
 }
 
-func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot, ci cindex.ConsistentIndexer) *bootstrappedWAL {
-	wal, st, ents, snap, meta := openWALFromSnapshot(cfg, snapshot)
+func bootstrapWALFromSnapshot(cfg config.ServerConfig, be *bootstrappedBackend) (*bootstrappedWAL, error) {
+	wal, st, ents, snap, meta := openWALFromSnapshot(cfg, be.snapshot)
 	bwal := &bootstrappedWAL{
 		lg:       cfg.Logger,
 		w:        wal,
@@ -678,9 +682,13 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot
 		meta:     meta,
 		haveWAL:  true,
 	}
+	if err := bwal.catchUpWithBackend(cfg, be.be); err != nil {
+		bwal.w.Close()
+		return nil, err
+	}
 
 	if cfg.ForceNewCluster {
-		consistentIndex := ci.ConsistentIndex()
+		consistentIndex := be.ci.ConsistentIndex()
 		oldCommitIndex := bwal.st.GetCommit()
 		// If only `HardState.Commit` increases, HardState won't be persisted
 		// to disk, even though the committed entries might have already been
@@ -713,7 +721,90 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, snapshot *raftpb.Snapshot
 			zap.Uint64("commit-index", bwal.st.GetCommit()),
 		)
 	}
-	return bwal
+	return bwal, nil
+}
+
+// catchUpWithBackend brings the raft state the WAL holds up to the backend's consistent index ci.
+//
+// The apply loop applies a Ready's committed entries while the raft loop saves that Ready (raft
+// hands out committed entries that are not yet stable, and raftNode.start sends them to the apply
+// loop before its Save), and the backend commits on its own timer: after a crash the backend can
+// hold entries up to a ci above the WAL's commit index, and even above its last index. Every entry
+// at or below ci was committed (it was applied), so the WAL is brought to ci:
+//
+//   - if the WAL holds the entry at ci with the backend's term for it, only the commit index is
+//     behind: the hard state's commit is raised to ci;
+//   - otherwise the WAL lacks the entry at ci, or holds an entry of another term there (an
+//     uncommitted entry the leader's log replaced, which the crash kept the WAL from replacing):
+//     a snapshot record at ci starts the log there, with the backend's term for ci and the
+//     configuration of the backend's members (both written with ci in one backend commit), and
+//     the hard state's commit is raised to ci. The snapshot record goes first: written above the
+//     commit index saved before it, it drops the entries the WAL holds above ci (ReadAll), which
+//     follow the replaced entry; a crash before the hard state leaves the record invalid
+//     (ValidSnapshotEntries), and the next start repeats this step.
+//
+// The term is raised to the backend's term for ci if it is below it, with no vote: a vote in a
+// term above the saved one was never sent (a member that is not the leader sends its messages
+// after the Save).
+//
+// raft then starts with its commit index at ci and refuses every snapshot at or below ci, and the
+// apply loop starts at or above the WAL snapshot as before; when a snapshot is written, at ci, so
+// that no entry at or below ci is applied again.
+func (wal *bootstrappedWAL) catchUpWithBackend(cfg config.ServerConfig, be backend.Backend) error {
+	lg := cfg.Logger
+	ci, ciTerm := schema.ReadConsistentIndex(be.ReadTx())
+	if ci <= wal.st.GetCommit() {
+		return nil
+	}
+	if ciTerm == 0 {
+		return fmt.Errorf("database file (%v index %d) is ahead of the WAL's commit index %d and has no term", cfg.BackendPath(), ci, wal.st.GetCommit())
+	}
+	snapi := wal.snapshot.GetMetadata().GetIndex()
+	inLog := false
+	if n := len(wal.ents); n > 0 && ci > snapi && ci <= wal.ents[n-1].GetIndex() {
+		inLog = wal.ents[ci-snapi-1].GetTerm() == ciTerm
+	}
+
+	st := &raftpb.HardState{Term: new(wal.st.GetTerm()), Vote: new(wal.st.GetVote()), Commit: new(ci)}
+	if wal.st.GetTerm() < ciTerm {
+		st.Term, st.Vote = new(ciTerm), new(uint64(0))
+	}
+	lg.Info(
+		"backend is ahead of the WAL; bringing the WAL up to the backend's consistent index",
+		zap.Uint64("consistent-index", ci),
+		zap.Uint64("consistent-term", ciTerm),
+		zap.Uint64("wal-commit-index", wal.st.GetCommit()),
+		zap.Uint64("wal-snapshot-index", snapi),
+		zap.Int("wal-entries", len(wal.ents)),
+		zap.Bool("wal-holds-consistent-entry", inLog),
+	)
+	if inLog {
+		if err := wal.w.Save(st, nil); err != nil {
+			return err
+		}
+		if err := wal.w.Sync(); err != nil {
+			return err
+		}
+		wal.st = st
+		return nil
+	}
+	cs := buildConfStateFromV3store(lg, be)
+	if err := wal.w.SaveSnapshot(&walpb.Snapshot{Index: new(ci), Term: new(ciTerm), ConfState: &cs}); err != nil {
+		return err
+	}
+	if err := wal.w.Save(st, nil); err != nil {
+		return err
+	}
+	if err := wal.w.Sync(); err != nil {
+		return err
+	}
+	// Read the WAL back from the new snapshot, as the next start will.
+	if err := wal.w.Close(); err != nil {
+		return err
+	}
+	sn := &raftpb.Snapshot{Metadata: &raftpb.SnapshotMetadata{Index: new(ci), Term: new(ciTerm), ConfState: &cs}}
+	wal.w, wal.st, wal.ents, wal.snapshot, wal.meta = openWALFromSnapshot(cfg, sn)
+	return nil
 }
 
 // openWALFromSnapshot reads the WAL at the given snap and returns the wal, its latest HardState and cluster ID, and all entries that appear
