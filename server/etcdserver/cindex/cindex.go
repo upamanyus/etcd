@@ -79,6 +79,10 @@ type consistentIndex struct {
 	be Backend
 	// mutex is protecting be.
 	mutex sync.Mutex
+	// pairMu makes consistentIndex and term one pair for UnsafeSave: the apply loop sets them
+	// outside the backend's batch lock (applyEntryNormal, a refused conf change), while the
+	// backend's commit saves them, and the saved term must be the term of the saved index.
+	pairMu sync.Mutex
 }
 
 // NewConsistentIndex creates a new consistent index.
@@ -110,13 +114,17 @@ func (ci *consistentIndex) UnsafeConsistentIndex() uint64 {
 }
 
 func (ci *consistentIndex) SetConsistentIndex(v uint64, term uint64) {
+	ci.pairMu.Lock()
+	defer ci.pairMu.Unlock()
 	atomic.StoreUint64(&ci.consistentIndex, v)
 	atomic.StoreUint64(&ci.term, term)
 }
 
 func (ci *consistentIndex) UnsafeSave(tx backend.UnsafeReadWriter) {
+	ci.pairMu.Lock()
 	index := atomic.LoadUint64(&ci.consistentIndex)
 	term := atomic.LoadUint64(&ci.term)
+	ci.pairMu.Unlock()
 	schema.UnsafeUpdateConsistentIndex(tx, index, term)
 }
 
