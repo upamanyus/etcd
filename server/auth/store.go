@@ -802,8 +802,14 @@ func (perms permSlice) Len() int {
 	return len(perms)
 }
 
+// Less orders the permissions by key, then by range end: a role's permissions have distinct
+// ranges (RoleGrantPermission replaces the one on the granted range), so the sorted record is
+// the same whatever order they were granted in.
 func (perms permSlice) Less(i, j int) bool {
-	return bytes.Compare(perms[i].Key, perms[j].Key) < 0
+	if c := bytes.Compare(perms[i].Key, perms[j].Key); c != 0 {
+		return c < 0
+	}
+	return bytes.Compare(perms[i].RangeEnd, perms[j].RangeEnd) < 0
 }
 
 func (perms permSlice) Swap(i, j int) {
