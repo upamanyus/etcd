@@ -1067,12 +1067,46 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	// applied state to the snapshot. Entries between the snapshot and the consistent
 	// index are skipped by the apply loop, as in any restart replay; the backend, the
 	// stores recovered from it and the replay configuration stay as they are.
+	//
+	// The cluster configuration and the transport's peers are not kept: the restart
+	// replay of entries at or below the consistent index set member attributes, the
+	// cluster version, the downgrade info and the peers in memory only, from entries
+	// older than the backend, and the entries that would set them back to the
+	// backend's values are covered by the snapshot. Recover them from the backend, as
+	// for a replaced backend.
 	if ci := s.consistIndex.ConsistentIndex(); toApply.snapshot.Metadata.GetIndex() <= ci {
 		lg.Info(
 			"backend already covers the snapshot; keeping it",
 			zap.Uint64("consistent-index", ci),
 			zap.Uint64("incoming-leader-snapshot-index", toApply.snapshot.Metadata.GetIndex()),
 		)
+
+		if err := s.r.storage.Release(toApply.snapshot); err != nil {
+			lg.Panic("failed to release Raft wal", zap.Error(err))
+		}
+
+		lg.Info("restoring cluster configuration")
+
+		s.cluster.Recover(api.UpdateCapability)
+
+		lg.Info("restored cluster configuration")
+		lg.Info("removing old peers from network")
+
+		// recover raft transport
+		s.r.transport.RemoveAllPeers()
+
+		lg.Info("removed old peers from network")
+		lg.Info("adding peers from new cluster configuration")
+
+		for _, m := range s.cluster.Members() {
+			if m.ID == s.MemberID() {
+				continue
+			}
+			s.r.transport.AddPeer(m.ID, m.PeerURLs)
+		}
+
+		lg.Info("added peers from new cluster configuration")
+
 		ep.appliedt = toApply.snapshot.Metadata.GetTerm()
 		ep.appliedi = toApply.snapshot.Metadata.GetIndex()
 		ep.diskSnapshotIndex = ep.appliedi
