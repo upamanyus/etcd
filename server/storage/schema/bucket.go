@@ -91,6 +91,9 @@ var (
 	ClusterDowngradeKeyName      = []byte("downgrade")
 	// Since v3.6
 	MetaStorageVersionName = []byte("storageVersion")
+	// MetaConsistentIndexRaftTermName holds the consistent index it was saved with and this
+	// member's raft term when it applied the entry at that index (16 bytes, both big-endian).
+	MetaConsistentIndexRaftTermName = []byte("consistentIndexRaftTerm")
 	// Before adding new meta key please update server/etcdserver/version
 )
 
@@ -99,8 +102,10 @@ func DefaultIgnores(bucket, key []byte) bool {
 	// consistent index & term might be changed due to v2 internal sync, which
 	// is not controllable by the user.
 	// storage version might change after wal snapshot and is not controller by user.
+	// The raft term saved with the consistent index is this member's own.
 	return bytes.Equal(bucket, Meta.Name()) &&
-		(bytes.Equal(key, MetaTermKeyName) || bytes.Equal(key, MetaConsistentIndexKeyName) || bytes.Equal(key, MetaStorageVersionName))
+		(bytes.Equal(key, MetaTermKeyName) || bytes.Equal(key, MetaConsistentIndexKeyName) ||
+			bytes.Equal(key, MetaStorageVersionName) || bytes.Equal(key, MetaConsistentIndexRaftTermName))
 }
 
 func BackendMemberKey(id types.ID) []byte {

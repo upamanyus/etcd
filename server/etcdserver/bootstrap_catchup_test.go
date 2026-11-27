@@ -42,13 +42,16 @@ import (
 )
 
 // catchUpImage is a member's disk after a crash: a WAL (its entries from index 1, then its hard
-// state) and a backend at consistent index ci, with term ciTerm and the given voters as members.
+// state) and a backend at consistent index ci, with term ciTerm, the member's raft term raftTerm
+// saved with index raftTermIndex (ci if 0; none if raftTerm is 0), and the given voters as members.
 type catchUpImage struct {
-	walTerms []uint64 // the term of WAL entry i+1
-	walHS    *raftpb.HardState
-	ci       uint64
-	ciTerm   uint64
-	members  []uint64
+	walTerms      []uint64 // the term of WAL entry i+1
+	walHS         *raftpb.HardState
+	ci            uint64
+	ciTerm        uint64
+	raftTerm      uint64
+	raftTermIndex uint64
+	members       []uint64
 }
 
 // catchUpResult is the raft state bootstrap hands raft.
@@ -112,6 +115,17 @@ func writeCatchUpImage(t *testing.T, cfg config.ServerConfig, img catchUpImage) 
 	tx.LockOutsideApply()
 	schema.UnsafeCreateMetaBucket(tx)
 	schema.UnsafeUpdateConsistentIndex(tx, img.ci, img.ciTerm)
+	if img.raftTerm != 0 {
+		// The meta key "consistentIndexRaftTerm": the index and the raft term, big-endian.
+		idx := img.raftTermIndex
+		if idx == 0 {
+			idx = img.ci
+		}
+		v := make([]byte, 16)
+		binary.BigEndian.PutUint64(v[:8], idx)
+		binary.BigEndian.PutUint64(v[8:], img.raftTerm)
+		tx.UnsafePut(schema.Meta, []byte("consistentIndexRaftTerm"), v)
+	}
 	tx.Unlock()
 	require.NoError(t, be.Close())
 }
@@ -256,7 +270,7 @@ func TestCatchUpWALBehindBackend(t *testing.T) {
 	img := catchUpImage{
 		walTerms: []uint64{1, 1, 1},
 		walHS:    &raftpb.HardState{Term: new(uint64(1)), Vote: new(uint64(2)), Commit: new(uint64(3))},
-		ci:       7, ciTerm: 2,
+		ci:       7, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3, 4, 5},
 	}
 	runCatchUpCase(t, img, catchUpExpect{
@@ -272,7 +286,7 @@ func TestCatchUpWALCommitBehindBackend(t *testing.T) {
 	img := catchUpImage{
 		walTerms: []uint64{1, 1, 1, 2, 2, 2, 2, 2},
 		walHS:    &raftpb.HardState{Term: new(uint64(2)), Vote: new(uint64(1)), Commit: new(uint64(3))},
-		ci:       6, ciTerm: 2,
+		ci:       6, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3},
 	}
 	runCatchUpCase(t, img, catchUpExpect{
@@ -291,7 +305,7 @@ func TestCatchUpWALConflictsWithBackend(t *testing.T) {
 	img := catchUpImage{
 		walTerms: []uint64{1, 1, 1, 1, 1, 1, 1, 1},
 		walHS:    &raftpb.HardState{Term: new(uint64(1)), Vote: new(uint64(3)), Commit: new(uint64(4))},
-		ci:       6, ciTerm: 2,
+		ci:       6, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3},
 	}
 	runCatchUpCase(t, img, catchUpExpect{
@@ -306,7 +320,7 @@ func TestCatchUpKeepsHigherTerm(t *testing.T) {
 	img := catchUpImage{
 		walTerms: []uint64{1, 1, 1},
 		walHS:    &raftpb.HardState{Term: new(uint64(5)), Vote: new(uint64(3)), Commit: new(uint64(3))},
-		ci:       7, ciTerm: 2,
+		ci:       7, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3},
 	}
 	runCatchUpCase(t, img, catchUpExpect{
@@ -339,7 +353,7 @@ func TestCatchUpRaftRefusesSnapshotBelowBackend(t *testing.T) {
 	writeCatchUpImage(t, cfg, catchUpImage{
 		walTerms: []uint64{1, 1, 1},
 		walHS:    &raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(3))},
-		ci:       7, ciTerm: 2,
+		ci:       7, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3, 4, 5},
 	})
 	_, b := bootCatchUp(t, cfg, true)
@@ -391,7 +405,7 @@ func TestCatchUpForceNewCluster(t *testing.T) {
 	writeCatchUpImage(t, cfg, catchUpImage{
 		walTerms: []uint64{1, 1, 1},
 		walHS:    &raftpb.HardState{Term: new(uint64(1)), Commit: new(uint64(3))},
-		ci:       7, ciTerm: 2,
+		ci:       7, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3},
 	})
 	_, b := bootCatchUp(t, cfg, true)

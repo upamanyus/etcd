@@ -69,3 +69,53 @@ func TestConsistentIndexSavesTermOfIndex(t *testing.T) {
 		t.Fatalf("a save paired a consistent index with another index's term")
 	}
 }
+
+// TestConsistentIndexSavesRaftTerm: the apply loop sets the member's raft term before it moves the
+// consistent index to the entries learned committed in that term (applyAll), while the backend's
+// commit saves them (UnsafeSave). Every save must tag the raft term with the consistent index saved
+// with it, and that raft term must be one set before the index (here: at least the index). The raft
+// term never decreases.
+func TestConsistentIndexSavesRaftTerm(t *testing.T) {
+	be, _ := betesting.NewDefaultTmpBackend(t)
+	defer betesting.Close(t, be)
+	tx := be.BatchTx()
+	tx.Lock()
+	schema.UnsafeCreateMetaBucket(tx)
+	tx.Unlock()
+
+	ci := NewConsistentIndex(be)
+	ci.SetRaftTerm(1)
+	ci.SetConsistentIndex(1, 1)
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := uint64(2); !stop.Load(); i++ {
+			ci.SetRaftTerm(i)
+			ci.SetRaftTerm(i - 1) // ignored: the raft term never decreases
+			ci.SetConsistentIndex(i, i)
+		}
+	}()
+	bad, saves := 0, 0
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && bad == 0 {
+		tx.Lock()
+		ci.UnsafeSave(tx)
+		idx, _ := schema.UnsafeReadConsistentIndex(tx)
+		rtIdx, rt, ok := schema.UnsafeReadConsistentIndexRaftTerm(tx)
+		tx.Unlock()
+		saves++
+		if !ok || rtIdx != idx || rt < idx {
+			bad++
+			t.Logf("saved consistent index %d with raft term %d tagged %d (present %v)", idx, rt, rtIdx, ok)
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
+	t.Logf("%d saves", saves)
+	if bad != 0 {
+		t.Fatalf("a save did not tag the consistent index with a raft term set before it")
+	}
+}

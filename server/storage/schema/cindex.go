@@ -58,6 +58,38 @@ func ReadConsistentIndex(tx backend.ReadTx) (uint64, uint64) {
 	return UnsafeReadConsistentIndex(tx)
 }
 
+// UnsafeReadConsistentIndexRaftTerm loads the consistent index the member's raft term was saved
+// with, and that term (UnsafeUpdateConsistentIndexRaftTerm). ok is false if the key is absent:
+// written by a binary that does not save it.
+func UnsafeReadConsistentIndexRaftTerm(tx backend.UnsafeReader) (index uint64, raftTerm uint64, ok bool) {
+	_, vs := tx.UnsafeRange(Meta, MetaConsistentIndexRaftTermName, nil, 0)
+	if len(vs) == 0 || len(vs[0]) != 16 {
+		return 0, 0, false
+	}
+	return binary.BigEndian.Uint64(vs[0][:8]), binary.BigEndian.Uint64(vs[0][8:]), true
+}
+
+// ReadConsistentIndexRaftTerm is UnsafeReadConsistentIndexRaftTerm holding the read lock.
+func ReadConsistentIndexRaftTerm(tx backend.ReadTx) (index uint64, raftTerm uint64, ok bool) {
+	tx.RLock()
+	defer tx.RUnlock()
+	return UnsafeReadConsistentIndexRaftTerm(tx)
+}
+
+// UnsafeUpdateConsistentIndexRaftTerm saves, with the consistent index index, the member's raft
+// term raftTerm at the time it applied the entry at index (at least the term in which the member
+// learned that the entry is committed). The value is tagged with index: a binary that saves the
+// consistent index without this key leaves a value whose index differs from the consistent index.
+func UnsafeUpdateConsistentIndexRaftTerm(tx backend.UnsafeReadWriter, index uint64, raftTerm uint64) {
+	if index == 0 || raftTerm == 0 {
+		return
+	}
+	bs := make([]byte, 16)
+	binary.BigEndian.PutUint64(bs[:8], index)
+	binary.BigEndian.PutUint64(bs[8:], raftTerm)
+	tx.UnsafePut(Meta, MetaConsistentIndexRaftTermName, bs)
+}
+
 func UnsafeUpdateConsistentIndexForce(tx backend.UnsafeReadWriter, index uint64, term uint64) {
 	unsafeUpdateConsistentIndex(tx, index, term, true)
 }
