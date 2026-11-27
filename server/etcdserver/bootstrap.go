@@ -721,6 +721,9 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, be *bootstrappedBackend) 
 			zap.Uint64("commit-index", bwal.st.GetCommit()),
 		)
 	}
+	// The backend saves this term with the consistent index until the apply loop sets a later
+	// one: every entry up to the hard state's commit index is committed in a term at most its own.
+	be.ci.SetRaftTerm(bwal.st.GetTerm())
 	return bwal, nil
 }
 
@@ -743,9 +746,14 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, be *bootstrappedBackend) 
 //     follow the replaced entry; a crash before the hard state leaves the record invalid
 //     (ValidSnapshotEntries), and the next start repeats this step.
 //
-// The term is raised to the backend's term for ci if it is below it, with no vote: a vote in a
-// term above the saved one was never sent (a member that is not the leader sends its messages
-// after the Save).
+// The term is raised, if it is below them, to the backend's term for ci and to the raft term the
+// backend saved with ci (this member's term when it applied the entry at ci, at least the term in
+// which it learned that ci is committed: the hard state that recorded it may be the one the crash
+// lost, and a member below that term could vote for, and acknowledge to, a leader of a lower term
+// whose log lacks ci). The vote goes with a raised term: a vote in a term above the saved one was
+// never sent (a member that is not the leader sends its messages after the Save). A backend whose
+// raft term was not saved with ci (written by a binary that does not save it) is refused: the
+// term in which ci was committed is unknown.
 //
 // raft then starts with its commit index at ci and refuses every snapshot at or below ci, and the
 // apply loop starts at or above the WAL snapshot as before; when a snapshot is written, at ci, so
@@ -759,6 +767,10 @@ func (wal *bootstrappedWAL) catchUpWithBackend(cfg config.ServerConfig, be backe
 	if ciTerm == 0 {
 		return fmt.Errorf("database file (%v index %d) is ahead of the WAL's commit index %d and has no term", cfg.BackendPath(), ci, wal.st.GetCommit())
 	}
+	rtIndex, raftTerm, ok := schema.ReadConsistentIndexRaftTerm(be.ReadTx())
+	if !ok || rtIndex != ci {
+		return fmt.Errorf("database file (%v index %d) is ahead of the WAL's commit index %d and has no raft term saved with its index", cfg.BackendPath(), ci, wal.st.GetCommit())
+	}
 	snapi := wal.snapshot.GetMetadata().GetIndex()
 	inLog := false
 	if n := len(wal.ents); n > 0 && ci > snapi && ci <= wal.ents[n-1].GetIndex() {
@@ -766,13 +778,14 @@ func (wal *bootstrappedWAL) catchUpWithBackend(cfg config.ServerConfig, be backe
 	}
 
 	st := &raftpb.HardState{Term: new(wal.st.GetTerm()), Vote: new(wal.st.GetVote()), Commit: new(ci)}
-	if wal.st.GetTerm() < ciTerm {
-		st.Term, st.Vote = new(ciTerm), new(uint64(0))
+	if term := max(ciTerm, raftTerm); wal.st.GetTerm() < term {
+		st.Term, st.Vote = new(term), new(uint64(0))
 	}
 	lg.Info(
 		"backend is ahead of the WAL; bringing the WAL up to the backend's consistent index",
 		zap.Uint64("consistent-index", ci),
 		zap.Uint64("consistent-term", ciTerm),
+		zap.Uint64("consistent-raft-term", raftTerm),
 		zap.Uint64("wal-commit-index", wal.st.GetCommit()),
 		zap.Uint64("wal-snapshot-index", snapi),
 		zap.Int("wal-entries", len(wal.ents)),

@@ -982,6 +982,15 @@ func (s *EtcdServer) Defragment() error {
 }
 
 func (s *EtcdServer) applyAll(ep *etcdProgress, apply *toApply) {
+	// The backend saves this member's raft term with every consistent index it saves (the boot
+	// step's catchUpWithBackend raises the hard state's term to it). apply.raftTerm is the term of
+	// the latest hard state raft handed out up to this batch: raft moves its commit index only in
+	// its current term, and hands out a hard state whenever its term or commit index changes, so
+	// it is at least the term in which this member learned the batch's entries committed. It is
+	// set before the batch's snapshot or entries move the consistent index.
+	if !raft.IsEmptySnap(apply.snapshot) || len(apply.entries) > 0 {
+		s.consistIndex.SetRaftTerm(apply.raftTerm)
+	}
 	s.applySnapshot(ep, apply)
 	s.applyEntries(ep, apply)
 	backend.VerifyBackendConsistency(s.Backend(), s.Logger(), true, schema.AllBuckets...)

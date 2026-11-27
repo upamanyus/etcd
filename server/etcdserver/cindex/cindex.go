@@ -43,6 +43,11 @@ type ConsistentIndexer interface {
 	// SetConsistentApplyingIndex set the consistent applying index of current executing entry.
 	SetConsistentApplyingIndex(v uint64, term uint64)
 
+	// SetRaftTerm sets the member's raft term that UnsafeSave saves with the consistent index:
+	// it must be at least the term in which the member learned that the entries applied from
+	// now on are committed. It never decreases.
+	SetRaftTerm(raftTerm uint64)
+
 	// UnsafeSave must be called holding the lock on the tx.
 	// It saves consistentIndex to the underlying stable storage.
 	UnsafeSave(tx backend.UnsafeReadWriter)
@@ -79,9 +84,15 @@ type consistentIndex struct {
 	be Backend
 	// mutex is protecting be.
 	mutex sync.Mutex
-	// pairMu makes consistentIndex and term one pair for UnsafeSave: the apply loop sets them
-	// outside the backend's batch lock (applyEntryNormal, a refused conf change), while the
-	// backend's commit saves them, and the saved term must be the term of the saved index.
+	// raftTerm is the member's raft term, at least the term in which it learned that the
+	// entries applied since it was set are committed (SetRaftTerm). UnsafeSave saves it with
+	// consistentIndex. Guarded by pairMu.
+	raftTerm uint64
+
+	// pairMu makes consistentIndex, term and raftTerm one triple for UnsafeSave: the apply loop
+	// sets them outside the backend's batch lock (applyEntryNormal, a refused conf change), while
+	// the backend's commit saves them, and the saved term must be the term of the saved index, the
+	// saved raft term a term in which the member knew the saved index committed.
 	pairMu sync.Mutex
 }
 
@@ -120,12 +131,22 @@ func (ci *consistentIndex) SetConsistentIndex(v uint64, term uint64) {
 	atomic.StoreUint64(&ci.term, term)
 }
 
+func (ci *consistentIndex) SetRaftTerm(raftTerm uint64) {
+	ci.pairMu.Lock()
+	defer ci.pairMu.Unlock()
+	if raftTerm > ci.raftTerm {
+		ci.raftTerm = raftTerm
+	}
+}
+
 func (ci *consistentIndex) UnsafeSave(tx backend.UnsafeReadWriter) {
 	ci.pairMu.Lock()
 	index := atomic.LoadUint64(&ci.consistentIndex)
 	term := atomic.LoadUint64(&ci.term)
+	raftTerm := ci.raftTerm
 	ci.pairMu.Unlock()
 	schema.UnsafeUpdateConsistentIndex(tx, index, term)
+	schema.UnsafeUpdateConsistentIndexRaftTerm(tx, index, raftTerm)
 }
 
 func (ci *consistentIndex) SetBackend(be Backend) {
@@ -176,6 +197,7 @@ func (f *fakeConsistentIndex) SetConsistentApplyingIndex(index uint64, term uint
 	atomic.StoreUint64(&f.term, term)
 }
 
+func (f *fakeConsistentIndex) SetRaftTerm(_ uint64)                  {}
 func (f *fakeConsistentIndex) UnsafeSave(_ backend.UnsafeReadWriter) {}
 func (f *fakeConsistentIndex) SetBackend(_ Backend)                  {}
 
