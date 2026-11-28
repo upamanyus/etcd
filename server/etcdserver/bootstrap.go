@@ -755,6 +755,11 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, be *bootstrappedBackend) 
 // raft term was not saved with ci (written by a binary that does not save it) is refused: the
 // term in which ci was committed is unknown.
 //
+// When the snapshot record replaces the log (the second case), the term is also raised above the
+// WAL's, so that the member starts a term in which it has neither voted nor campaigned with the log
+// the record dropped. raft's safety does not need this raise; it keeps every term of the member's
+// history with a single log of its own, which makes the step simpler to verify.
+//
 // raft then starts with its commit index at ci and refuses every snapshot at or below ci, and the
 // apply loop starts at or above the WAL snapshot as before; when a snapshot is written, at ci, so
 // that no entry at or below ci is applied again.
@@ -781,12 +786,22 @@ func (wal *bootstrappedWAL) catchUpWithBackend(cfg config.ServerConfig, be backe
 	if term := max(ciTerm, raftTerm); wal.st.GetTerm() < term {
 		st.Term, st.Vote = new(term), new(uint64(0))
 	}
+	if !inLog {
+		// The snapshot record drops the entries the WAL holds above ci, so the member starts a
+		// new term: its records of the old term (a campaign of its own in it, with the log it
+		// campaigned with) no longer describe its log. The term is above Term_w and so the same
+		// at every start that repeats this step (the hard state saved here sets the commit
+		// index to ci, after which the step does not run again).
+		st.Term, st.Vote = new(max(ciTerm, raftTerm, wal.st.GetTerm()+1)), new(uint64(0))
+	}
 	lg.Info(
 		"backend is ahead of the WAL; bringing the WAL up to the backend's consistent index",
 		zap.Uint64("consistent-index", ci),
 		zap.Uint64("consistent-term", ciTerm),
 		zap.Uint64("consistent-raft-term", raftTerm),
 		zap.Uint64("wal-commit-index", wal.st.GetCommit()),
+		zap.Uint64("wal-term", wal.st.GetTerm()),
+		zap.Uint64("term", st.GetTerm()),
 		zap.Uint64("wal-snapshot-index", snapi),
 		zap.Int("wal-entries", len(wal.ents)),
 		zap.Bool("wal-holds-consistent-entry", inLog),
