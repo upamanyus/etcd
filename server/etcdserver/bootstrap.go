@@ -755,6 +755,14 @@ func bootstrapWALFromSnapshot(cfg config.ServerConfig, be *bootstrappedBackend) 
 // raft term was not saved with ci (written by a binary that does not save it) is refused: the
 // term in which ci was committed is unknown.
 //
+// When the snapshot record replaces the log (the second case) and the member's vote at the WAL's
+// term is its own (it campaigned in that term, with the log the record drops), the term is also
+// raised above the WAL's, so that the member starts a term in which it has neither voted nor
+// campaigned. raft's safety does not need this raise (the votes a candidate received do not
+// outlive its restart); it keeps every campaign of the member with the log it holds, which makes
+// the step simpler to verify. A member that voted for another, or not at all, keeps its term
+// and vote: raising them would make a stable leader step down.
+//
 // raft then starts with its commit index at ci and refuses every snapshot at or below ci, and the
 // apply loop starts at or above the WAL snapshot as before; when a snapshot is written, at ci, so
 // that no entry at or below ci is applied again.
@@ -781,12 +789,22 @@ func (wal *bootstrappedWAL) catchUpWithBackend(cfg config.ServerConfig, be backe
 	if term := max(ciTerm, raftTerm); wal.st.GetTerm() < term {
 		st.Term, st.Vote = new(term), new(uint64(0))
 	}
+	if !inLog && wal.st.GetVote() != 0 && wal.st.GetVote() == uint64(wal.meta.nodeID) {
+		// The snapshot record drops the entries the WAL holds above ci, and the member voted for
+		// itself at Term_w (it campaigned there, with the log the record drops): it starts a new
+		// term. The term is above Term_w and so the same at every start that repeats this step
+		// (the hard state saved here sets the commit index to ci, after which the step does not
+		// run again).
+		st.Term, st.Vote = new(max(ciTerm, raftTerm, wal.st.GetTerm()+1)), new(uint64(0))
+	}
 	lg.Info(
 		"backend is ahead of the WAL; bringing the WAL up to the backend's consistent index",
 		zap.Uint64("consistent-index", ci),
 		zap.Uint64("consistent-term", ciTerm),
 		zap.Uint64("consistent-raft-term", raftTerm),
 		zap.Uint64("wal-commit-index", wal.st.GetCommit()),
+		zap.Uint64("wal-term", wal.st.GetTerm()),
+		zap.Uint64("term", st.GetTerm()),
 		zap.Uint64("wal-snapshot-index", snapi),
 		zap.Int("wal-entries", len(wal.ents)),
 		zap.Bool("wal-holds-consistent-entry", inLog),

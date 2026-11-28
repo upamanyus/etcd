@@ -314,19 +314,64 @@ func TestCatchUpWALConflictsWithBackend(t *testing.T) {
 	})
 }
 
-// TestCatchUpKeepsHigherTerm: the WAL's term is above the backend's term for ci (the member
-// voted in a later term before the crash): the term and the vote stay.
+// TestCatchUpKeepsHigherTerm: the WAL holds the entry at ci and its term is above the backend's
+// term for ci (the member voted in a later term before the crash): only the commit index is
+// raised; the term and the vote stay.
 func TestCatchUpKeepsHigherTerm(t *testing.T) {
 	img := catchUpImage{
-		walTerms: []uint64{1, 1, 1},
+		walTerms: []uint64{1, 1, 1, 2, 2, 2, 2},
 		walHS:    &raftpb.HardState{Term: new(uint64(5)), Vote: new(uint64(3)), Commit: new(uint64(3))},
-		ci:       7, ciTerm: 2, raftTerm: 2,
+		ci:       6, ciTerm: 2, raftTerm: 2,
 		members: []uint64{1, 2, 3},
 	}
 	runCatchUpCase(t, img, catchUpExpect{
-		snapIndex: 7, snapTerm: 2, snapVoters: []uint64{1, 2, 3},
-		term: 5, vote: 3, commit: 7,
+		snapIndex: 0, snapTerm: 0, snapVoters: []uint64{1, 2, 3},
+		term: 5, vote: 3, commit: 6,
+		entIndex: []uint64{1, 2, 3, 4, 5, 6, 7},
 	})
+}
+
+// TestCatchUpSnapshotRaisesTerm: when the snapshot record replaces the log and the WAL's vote is
+// the member's own (id 1: it campaigned at Term_w with the log the record drops), the term is
+// raised above the WAL's even when the WAL's is at or above the backend's term for ci and its raft
+// term: to Term_w + 1, with no vote. A member whose vote is another's, or none, keeps its term and
+// vote (unless the raft term or ci's term is above it, as before). The second start finds the
+// commit index at ci and changes nothing, and every crash point of the first start's write gives
+// the same state (runCatchUpCase).
+func TestCatchUpSnapshotRaisesTerm(t *testing.T) {
+	hs := func(term, vote uint64) *raftpb.HardState {
+		return &raftpb.HardState{Term: new(term), Vote: new(vote), Commit: new(uint64(3))}
+	}
+	for _, c := range []struct {
+		name       string
+		walTerms   []uint64
+		walHS      *raftpb.HardState
+		raftTerm   uint64
+		term, vote uint64
+	}{
+		// Own vote: raised.
+		{"own vote, WAL ends below ci", []uint64{1, 1, 1}, hs(5, 1), 2, 6, 0},
+		{"own vote, WAL conflicts at ci", []uint64{1, 1, 1, 5, 5, 5, 5, 5}, hs(5, 1), 5, 6, 0},
+		{"own vote, raft term equals the WAL's", []uint64{1, 1, 1}, hs(4, 1), 4, 5, 0},
+		{"own vote, raft term above", []uint64{1, 1, 1}, hs(4, 1), 9, 9, 0},
+		// Another's vote, or none: kept.
+		{"other's vote, WAL ends below ci", []uint64{1, 1, 1}, hs(5, 3), 2, 5, 3},
+		{"other's vote, WAL conflicts at ci", []uint64{1, 1, 1, 5, 5, 5, 5, 5}, hs(5, 2), 5, 5, 2},
+		{"no vote, raft term equals the WAL's", []uint64{1, 1, 1}, hs(4, 0), 4, 4, 0},
+		{"other's vote, raft term above", []uint64{1, 1, 1}, hs(4, 3), 9, 9, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			img := catchUpImage{
+				walTerms: c.walTerms, walHS: c.walHS,
+				ci: 7, ciTerm: 2, raftTerm: c.raftTerm,
+				members: []uint64{1, 2, 3},
+			}
+			runCatchUpCase(t, img, catchUpExpect{
+				snapIndex: 7, snapTerm: 2, snapVoters: []uint64{1, 2, 3},
+				term: c.term, vote: c.vote, commit: 7,
+			})
+		})
+	}
 }
 
 // TestCatchUpNoTermRefused: a backend ahead of the WAL that has no term for ci (written before
